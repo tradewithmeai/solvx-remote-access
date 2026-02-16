@@ -14,7 +14,7 @@ export default defineConfig({
         short_name: 'RustDesk',
         description: 'Open-source remote desktop client for Chromebook',
         theme_color: '#0071ff',
-        background_color: '#0f172a',
+        background_color: '#0F1117',
         display: 'standalone',
         orientation: 'any',
         start_url: '/',

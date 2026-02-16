@@ -52,6 +52,13 @@ interface AppState {
   error: { title: string; message: string } | null;
   chatMessages: { text: string; from: 'remote' | 'local'; time: number }[];
 
+  // Quality metrics
+  latencyMs: number;
+  fps: number;
+  clipboardNotice: string | null;
+  scaleMode: 'fit' | 'original';
+  disconnectedPeerId: string | null;
+
   // Canvas
   currentFrame: VideoFrame | null;
   cursorData: CursorData | null;
@@ -87,6 +94,10 @@ interface AppState {
   downloadFile: (entry: FileEntry) => void;
   uploadFiles: (files: File[]) => void;
   cancelFileJob: (id: number) => void;
+
+  // Improvement actions
+  reconnect: () => void;
+  toggleScaleMode: () => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -105,6 +116,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   twoFAEnableTrustedDevices: false,
   error: null,
   chatMessages: [],
+  latencyMs: 0,
+  fps: 0,
+  clipboardNotice: null,
+  scaleMode: 'fit' as const,
+  disconnectedPeerId: null,
   currentFrame: null,
   cursorData: null,
   cursorPosition: null,
@@ -126,10 +142,23 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const audio = new AudioPlayer();
     const cursorCache = new Map<number, CursorData>();
+    let frameCount = 0;
+    let lastFpsTime = Date.now();
+    const fpsInterval = setInterval(() => {
+      const now = Date.now();
+      const elapsed = (now - lastFpsTime) / 1000;
+      if (elapsed > 0) set({ fps: Math.round(frameCount / elapsed) });
+      frameCount = 0;
+      lastFpsTime = now;
+    }, 1000);
 
     const events: ConnectionEvents = {
       onStatus: (status, detail) => {
         set({ status, statusDetail: detail || '' });
+        if (status === 'disconnected' || status === 'error') {
+          set({ disconnectedPeerId: id });
+          clearInterval(fpsInterval);
+        }
       },
       onPeerInfo: (info) => {
         set({ peerInfo: info, passwordRequired: false });
@@ -148,6 +177,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         } catch {}
       },
       onVideoFrame: (frame) => {
+        frameCount++;
         set({ currentFrame: frame });
       },
       onAudioFormat: (channels, sampleRate) => {
@@ -172,6 +202,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
       onClipboard: (text) => {
         navigator.clipboard?.writeText(text).catch(() => {});
+        set({ clipboardNotice: 'Clipboard received from remote' });
+        setTimeout(() => set({ clipboardNotice: null }), 2000);
       },
       onPermission: () => {},
       onChat: (text) => {
@@ -241,6 +273,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       on2FARequired: (isRetry, enableTrustedDevices) => {
         set({ twoFARequired: true, twoFARetry: isRetry, twoFAEnableTrustedDevices: enableTrustedDevices });
       },
+      onLatency: (ms) => {
+        set({ latencyMs: ms });
+      },
       onError: (title, message) => {
         set({ error: { title, message } });
       },
@@ -277,6 +312,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       peerInfo: null,
       currentFrame: null,
       passwordRequired: false,
+      latencyMs: 0,
+      fps: 0,
+      disconnectedPeerId: null,
     });
   },
 
@@ -430,5 +468,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     set(s => ({
       fileJobs: s.fileJobs.filter(j => j.id !== id),
     }));
+  },
+
+  reconnect: () => {
+    const peerId = get().disconnectedPeerId || get().peerId;
+    if (!peerId) return;
+    set({ disconnectedPeerId: null, error: null });
+    get().connect(peerId);
+  },
+
+  toggleScaleMode: () => {
+    set(s => ({ scaleMode: s.scaleMode === 'fit' ? 'original' : 'fit' }));
   },
 }));

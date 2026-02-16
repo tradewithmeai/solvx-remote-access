@@ -70,6 +70,7 @@ export interface ConnectionEvents {
   onFileTransferDigest: (digest: FileTransferDigest) => void;
   onFileTransferDone: (done: FileTransferDone) => void;
   onFileTransferError: (err: FileTransferError) => void;
+  onLatency: (ms: number) => void;
   onError: (title: string, message: string) => void;
 }
 
@@ -85,6 +86,9 @@ export class Connection {
   private msgQueue: Partial<Message>[] = [];
   private msgInterval: ReturnType<typeof setInterval> | null = null;
   private closed = false;
+  private adaptiveInterval: ReturnType<typeof setInterval> | null = null;
+  private recentLatencies: number[] = [];
+  private currentQuality: string = 'balanced';
 
   constructor(events: ConnectionEvents) {
     this.events = events;
@@ -336,8 +340,23 @@ export class Connection {
         }
         this.sendLogin();
       } else if (msg.test_delay) {
-        if (!msg.test_delay.from_client) {
+        if (msg.test_delay.from_client) {
+          // Response to our ping - calculate RTT
+          const sent = Long.isLong(msg.test_delay.time)
+            ? msg.test_delay.time.toNumber()
+            : Number(msg.test_delay.time ?? 0);
+          if (sent > 0) {
+            const latency = Date.now() - sent;
+            this.events.onLatency(latency);
+            this.recentLatencies.push(latency);
+            if (this.recentLatencies.length > 10) this.recentLatencies.shift();
+          }
+        } else {
+          // Server ping - echo back and also send our own
           this.ws?.sendMessage({ test_delay: msg.test_delay });
+          this.ws?.sendMessage({
+            test_delay: { time: Long.fromNumber(Date.now()), from_client: true },
+          });
         }
       } else if (msg.login_response) {
         const r = msg.login_response;
@@ -359,6 +378,7 @@ export class Connection {
         if (!this.firstFrame) {
           this.firstFrame = true;
           this.events.onStatus('connected');
+          this.startAdaptiveQuality();
         }
         this.events.onVideoFrame(msg.video_frame);
       } else if (msg.clipboard) {
@@ -716,6 +736,7 @@ export class Connection {
   close() {
     this.closed = true;
     if (this.msgInterval) clearInterval(this.msgInterval);
+    if (this.adaptiveInterval) clearInterval(this.adaptiveInterval);
     this.msgQueue = [];
     this.ws?.close();
     this.ws = null;
@@ -726,6 +747,24 @@ export class Connection {
     this.closed = false;
     this.firstFrame = false;
     await this.connect(this.id);
+  }
+
+  private startAdaptiveQuality() {
+    if (this.adaptiveInterval) return;
+    this.adaptiveInterval = setInterval(() => {
+      if (this.recentLatencies.length < 3) return;
+      const avg = this.recentLatencies.reduce((a, b) => a + b, 0) / this.recentLatencies.length;
+
+      let target: string;
+      if (avg > 200) target = 'low';
+      else if (avg > 100) target = 'balanced';
+      else target = 'best';
+
+      if (target !== this.currentQuality) {
+        this.currentQuality = target;
+        this.setImageQuality(target);
+      }
+    }, 5000);
   }
 
   // === Helpers ===

@@ -1,0 +1,2 @@
+rootProject.name = 'RustDeskPWA'
+include ':app'

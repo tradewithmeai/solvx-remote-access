@@ -24,24 +24,33 @@ export function RemotePage() {
     cursorData,
     currentFrame,
     fileTransferOpen,
+    latencyMs,
+    fps,
+    scaleMode,
+    clipboardNotice,
+    disconnectedPeerId,
+    error,
     disconnect,
     connect,
     openFileTransfer,
+    toggleScaleMode,
+    reconnect,
+    dismissError,
   } = useAppStore();
 
   // Connect if not already connected
   useEffect(() => {
-    if (!connection && id && status === 'idle') {
+    if (!connection && id && status === 'idle' && !disconnectedPeerId) {
       connect(decodeURIComponent(id));
     }
-  }, [id, connection, status, connect]);
+  }, [id, connection, status, connect, disconnectedPeerId]);
 
-  // Navigate back on disconnect
+  // Navigate back only on explicit user disconnect (status idle, no disconnected peer)
   useEffect(() => {
-    if (status === 'idle' || status === 'error') {
+    if (status === 'idle' && !disconnectedPeerId) {
       navigate('/');
     }
-  }, [status, navigate]);
+  }, [status, disconnectedPeerId, navigate]);
 
   // Initialize video renderer
   useEffect(() => {
@@ -147,7 +156,6 @@ export function RemotePage() {
       const canvas = canvasRef.current;
       if (!canvas || !peerInfo?.displays?.length) return { x: 0, y: 0 };
       const rect = canvas.getBoundingClientRect();
-      // Use canvas actual pixel dimensions (set by decoder) for scaling
       const scaleX = canvas.width / rect.width;
       const scaleY = canvas.height / rect.height;
       return {
@@ -195,7 +203,6 @@ export function RemotePage() {
     (e: React.WheelEvent) => {
       if (!connection) return;
       const { x, y } = getRemoteCoords(e as unknown as React.MouseEvent);
-      // Scroll mask: bit 0-1 = direction (down=0, up=1), bit 3 = scroll button
       const scrollMask = e.deltaY > 0 ? (128 | 8) : (64 | 8);
       connection.sendMouse(scrollMask, x, y, e.altKey, e.ctrlKey, e.shiftKey, e.metaKey);
     },
@@ -209,6 +216,8 @@ export function RemotePage() {
       const text = e.clipboardData?.getData('text/plain');
       if (text) {
         connection.sendClipboard(text);
+        useAppStore.setState({ clipboardNotice: 'Clipboard sent to remote' });
+        setTimeout(() => useAppStore.setState({ clipboardNotice: null }), 2000);
       }
     };
 
@@ -262,7 +271,6 @@ export function RemotePage() {
     state.fingers = Math.max(state.fingers, e.touches.length);
 
     if (e.touches.length === 1) {
-      // Single finger drag = mouse move
       const { x, y } = getTouchCoords(e.touches[0]);
       connection.sendMouse(0, x, y);
       state.lastX = e.touches[0].clientX;
@@ -271,7 +279,6 @@ export function RemotePage() {
       const dy = Math.abs(state.lastY - state.startY);
       if (dx > 10 || dy > 10) state.moved = true;
     } else if (e.touches.length === 2) {
-      // Two finger scroll
       const dy = e.touches[0].clientY - state.lastY;
       if (Math.abs(dy) > 5) {
         const { x, y } = getTouchCoords(e.touches[0]);
@@ -296,16 +303,13 @@ export function RemotePage() {
       );
 
       if (state.fingers === 1) {
-        // Single tap = left click
         connection.sendMouse(1 | (1 << 3), x, y);
         setTimeout(() => connection.sendMouse(2 | (1 << 3), x, y), 50);
       } else if (state.fingers === 2) {
-        // Two-finger tap = right click
         connection.sendMouse(1 | (2 << 3), x, y);
         setTimeout(() => connection.sendMouse(2 | (2 << 3), x, y), 50);
       }
     } else if (!state.moved && elapsed >= 500 && state.fingers === 1) {
-      // Long press = right click
       const { x, y } = getTouchCoords(
         e.changedTouches[0] || { clientX: state.startX, clientY: state.startY }
       );
@@ -337,6 +341,12 @@ export function RemotePage() {
     e.preventDefault();
   }, []);
 
+  const canvasClass = scaleMode === 'fit'
+    ? 'remote-canvas max-w-full max-h-full object-contain touch-none'
+    : 'remote-canvas touch-none';
+
+  const isDisconnected = status === 'disconnected' || (status === 'error' && disconnectedPeerId);
+
   return (
     <div
       ref={containerRef}
@@ -345,6 +355,10 @@ export function RemotePage() {
       {/* Toolbar */}
       <Toolbar
         peerInfo={peerInfo}
+        latencyMs={latencyMs}
+        fps={fps}
+        scaleMode={scaleMode}
+        clipboardNotice={clipboardNotice}
         onDisconnect={() => {
           disconnect();
           navigate('/');
@@ -356,6 +370,7 @@ export function RemotePage() {
         onFullscreen={() => {
           containerRef.current?.requestFullscreen?.();
         }}
+        onToggleScale={toggleScaleMode}
         onSwitchDisplay={(d) => {
           connection?.switchDisplay(d);
           setCurrentDisplay(d);
@@ -364,8 +379,37 @@ export function RemotePage() {
       />
 
       {/* Canvas */}
-      <div className="flex-1 flex items-center justify-center overflow-hidden">
-        {status === 'connecting' || status === 'authenticating' ? (
+      <div className={`flex-1 flex items-center justify-center ${scaleMode === 'original' ? 'overflow-auto' : 'overflow-hidden'}`}>
+        {isDisconnected ? (
+          <div className="text-center flex flex-col items-center gap-4">
+            <div className="text-red-400 text-lg font-medium">
+              {error?.title || 'Connection Lost'}
+            </div>
+            <p className="text-rustdesk-muted text-sm max-w-xs">
+              {error?.message || 'The connection to the remote desktop was interrupted.'}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  dismissError();
+                  reconnect();
+                }}
+                className="bg-rustdesk-primary hover:bg-blue-600 text-white px-6 py-2.5 rounded-lg font-medium transition-colors"
+              >
+                Reconnect
+              </button>
+              <button
+                onClick={() => {
+                  disconnect();
+                  navigate('/');
+                }}
+                className="border border-rustdesk-border text-rustdesk-muted hover:text-white px-6 py-2.5 rounded-lg transition-colors"
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        ) : status === 'connecting' || status === 'authenticating' ? (
           <div className="text-rustdesk-muted flex flex-col items-center gap-4">
             <div className="w-8 h-8 border-2 border-rustdesk-primary border-t-transparent rounded-full animate-spin" />
             <p className="text-sm">
@@ -379,7 +423,7 @@ export function RemotePage() {
             ref={canvasRef}
             width={1920}
             height={1080}
-            className="remote-canvas max-w-full max-h-full object-contain touch-none"
+            className={canvasClass}
             onMouseDown={handleMouseDown}
             onMouseUp={handleMouseUp}
             onMouseMove={handleMouseMove}
