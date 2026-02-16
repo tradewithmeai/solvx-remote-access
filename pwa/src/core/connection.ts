@@ -150,6 +150,7 @@ export class Connection {
       this.events.onStatus('connecting', 'Connecting to rendezvous server...');
       await this.startConnection(id);
     } catch (e: any) {
+      if (this.msgInterval) { clearInterval(this.msgInterval); this.msgInterval = null; }
       this.events.onError(
         'Connection Error',
         e.message || 'Connection failed'
@@ -469,6 +470,12 @@ export class Connection {
 
   private async handleTerminalResponse(tr: NonNullable<Message['terminal_response']>) {
     if (tr.opened) {
+      // Terminal-only connections may never receive a video frame,
+      // so mark connected here too.
+      if (!this.firstFrame) {
+        this.firstFrame = true;
+        this.events.onStatus('connected');
+      }
       this.events.onTerminalOpened(tr.opened as TerminalOpened);
     } else if (tr.data) {
       const td = tr.data;
@@ -898,9 +905,10 @@ export class Connection {
     const isDomain = !this.isIpAddress(host.split(':')[0]);
 
     if (isDomain) {
-      const hostname = host.split(':')[0];
+      // Preserve custom port (e.g. example.com:8443)
+      const hostPort = host.includes(':') ? host : host;
       const path = isRelay ? '/ws/relay' : '/ws/id';
-      return 'wss://' + hostname + path;
+      return 'wss://' + hostPort + path;
     }
 
     const scheme = 'wss://';
