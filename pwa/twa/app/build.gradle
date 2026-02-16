@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.rustdesk.pwa'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.rustdesk.pwa"
+        minSdk 23
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+
+        // TWA configuration
+        manifestPlaceholders = [
+            hostName      : "rustdesk-pwa.vercel.app",
+            defaultUrl    : "https://rustdesk-pwa.vercel.app",
+            launcherName  : "RustDesk",
+            assetStatements: '[{ "relation": ["delegate_permission/common.handle_all_urls"], ' +
+                             '"target": { "namespace": "web", "site": "https://rustdesk-pwa.vercel.app" } }]'
+        ]
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.5.0'
+}
