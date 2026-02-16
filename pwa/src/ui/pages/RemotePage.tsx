@@ -121,10 +121,13 @@ export function RemotePage() {
     }
   }, [cursorData]);
 
-  // Keyboard event handlers
+  // Keyboard event handlers — only forward to remote desktop when desktop tab is active
+  const viewModeRef = useRef<ViewMode>(viewMode);
+  useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (!connection) return;
+      if (!connection || viewModeRef.current !== 'desktop') return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -144,7 +147,7 @@ export function RemotePage() {
 
   const handleKeyUp = useCallback(
     (e: KeyboardEvent) => {
-      if (!connection) return;
+      if (!connection || viewModeRef.current !== 'desktop') return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -215,8 +218,12 @@ export function RemotePage() {
     (e: React.WheelEvent) => {
       if (!connection) return;
       const { x, y } = getRemoteCoords(e as unknown as React.MouseEvent);
-      const scrollMask = e.deltaY > 0 ? (128 | 8) : (64 | 8);
-      connection.sendMouse(scrollMask, x, y, e.altKey, e.ctrlKey, e.shiftKey, e.metaKey);
+      // RustDesk protocol: mask lower 3 bits = MOUSE_TYPE_WHEEL (3)
+      // x/y carry scroll direction: -1 (up/left) or 1 (down/right)
+      const scrollMask = 3; // MOUSE_TYPE_WHEEL
+      const dy = e.deltaY > 0 ? -1 : 1;
+      const dx = e.deltaX !== 0 ? (e.deltaX > 0 ? -1 : 1) : 0;
+      connection.sendMouse(scrollMask, dx, dy, e.altKey, e.ctrlKey, e.shiftKey, e.metaKey);
     },
     [connection, getRemoteCoords]
   );
@@ -293,9 +300,8 @@ export function RemotePage() {
     } else if (e.touches.length === 2) {
       const dy = e.touches[0].clientY - state.lastY;
       if (Math.abs(dy) > 5) {
-        const { x, y } = getTouchCoords(e.touches[0]);
-        const scrollMask = dy > 0 ? (128 | 8) : (64 | 8);
-        connection.sendMouse(scrollMask, x, y);
+        // MOUSE_TYPE_WHEEL = 3, scroll direction in y: 1 = up, -1 = down
+        connection.sendMouse(3, 0, dy > 0 ? -1 : 1);
         state.lastY = e.touches[0].clientY;
         state.lastX = e.touches[0].clientX;
       }

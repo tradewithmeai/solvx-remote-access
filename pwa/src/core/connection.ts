@@ -330,9 +330,9 @@ export class Connection {
         return false;
       }
 
-      const [mySk, myPk] = crypto.genBoxKeyPair();
-      const secretKey = crypto.genSecretKey();
-      const sealedKey = crypto.seal(secretKey, idpk.pk, mySk);
+      const [mySk, myPk] = await crypto.genBoxKeyPair();
+      const secretKey = await crypto.genSecretKey();
+      const sealedKey = await crypto.seal(secretKey, idpk.pk, mySk);
 
       this.ws?.sendMessage({
         public_key: {

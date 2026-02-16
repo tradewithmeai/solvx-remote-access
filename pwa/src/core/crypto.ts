@@ -25,25 +25,28 @@ export async function verify(
   return s.crypto_sign_open(signed, pk);
 }
 
-export function genBoxKeyPair(): [Uint8Array, Uint8Array] {
-  const pair = sodium.crypto_box_keypair();
+export async function genBoxKeyPair(): Promise<[Uint8Array, Uint8Array]> {
+  const s = await ensureSodium();
+  const pair = s.crypto_box_keypair();
   return [pair.privateKey, pair.publicKey];
 }
 
-export function genSecretKey(): Uint8Array {
-  return sodium.crypto_secretbox_keygen();
+export async function genSecretKey(): Promise<Uint8Array> {
+  const s = await ensureSodium();
+  return s.crypto_secretbox_keygen();
 }
 
-export function seal(
+export async function seal(
   plaintext: Uint8Array,
   theirPk: Uint8Array,
   ourSk: Uint8Array
-): Uint8Array {
+): Promise<Uint8Array> {
   // Zero nonce is a protocol constraint — the Rust server (tcp.rs:331) uses the
   // same: box_::Nonce([0u8; box_::NONCEBYTES]). This is safe because ephemeral
   // keypairs are generated per connection, so the same key+nonce pair is never reused.
+  const s = await ensureSodium();
   const nonce = new Uint8Array(24);
-  return sodium.crypto_box_easy(plaintext, nonce, theirPk, ourSk);
+  return s.crypto_box_easy(plaintext, nonce, theirPk, ourSk);
 }
 
 function makeNonce(value: number): Uint8Array {

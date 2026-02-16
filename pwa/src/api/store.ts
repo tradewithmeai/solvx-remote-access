@@ -76,6 +76,9 @@ interface AppState {
   activeTerminalId: number | null;
   terminalDataHandler: ((terminalId: number, data: Uint8Array) => void) | null;
 
+  // Upload confirmation waiters
+  uploadWaiters: Map<number, () => void>;
+
   // Peers
   recentPeers: Peer[];
   serverConfig: {
@@ -112,6 +115,9 @@ interface AppState {
   toggleScaleMode: () => void;
 }
 
+// Module-level ref so disconnect() can clear the fps interval
+let activeFpsInterval: ReturnType<typeof setInterval> | null = null;
+
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   connection: null,
@@ -144,6 +150,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   terminalSessions: new Map(),
   activeTerminalId: null,
   terminalDataHandler: null,
+  uploadWaiters: new Map(),
   recentPeers: [],
   serverConfig: {
     rendezvousServer: localStorage.getItem('custom-rendezvous-server') || '',
@@ -160,6 +167,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const cursorCache = new Map<number, CursorData>();
     let frameCount = 0;
     let lastFpsTime = Date.now();
+    if (activeFpsInterval) clearInterval(activeFpsInterval);
     const fpsInterval = setInterval(() => {
       const now = Date.now();
       const elapsed = (now - lastFpsTime) / 1000;
@@ -167,6 +175,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       frameCount = 0;
       lastFpsTime = now;
     }, 1000);
+    activeFpsInterval = fpsInterval;
 
     const events: ConnectionEvents = {
       onStatus: (status, detail) => {
@@ -248,10 +257,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         });
       },
       onFileTransferDigest: (digest) => {
-        // Confirm the download (don't skip, start from block 0)
+        const id = digest.id ?? 0;
+        // Check if this is a confirmation for an upload we're waiting on
+        const waiter = get().uploadWaiters.get(id);
+        if (waiter) {
+          const waiters = new Map(get().uploadWaiters);
+          waiters.delete(id);
+          set({ uploadWaiters: waiters });
+          waiter();
+          return;
+        }
+        // Otherwise it's a download — confirm it (don't skip, start from block 0)
         const conn = get().connection;
         if (conn) {
-          conn.confirmDownload(digest.id ?? 0, digest.file_num ?? 0, false, 0);
+          conn.confirmDownload(id, digest.file_num ?? 0, false, 0);
         }
       },
       onFileTransferDone: (done) => {
@@ -355,6 +374,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (conn) conn.close();
     const audio = get().audioPlayer;
     if (audio) audio.destroy();
+    if (activeFpsInterval) {
+      clearInterval(activeFpsInterval);
+      activeFpsInterval = null;
+    }
     set({
       connection: null,
       audioPlayer: null,
@@ -484,7 +507,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         }],
       }));
 
+      // Wait for server to confirm it's ready (FileTransferDigest)
+      const confirmed = new Promise<void>((resolve) => {
+        const waiters = new Map(get().uploadWaiters);
+        waiters.set(id, resolve);
+        set({ uploadWaiters: waiters });
+      });
+
       conn.requestUpload(id, remotePath, [entry], 0, file.size);
+
+      // Wait for server confirmation before sending blocks
+      await confirmed;
 
       // Read and send file in 64KB blocks
       const BLOCK_SIZE = 65536;
@@ -554,8 +587,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   reconnect: () => {
     const peerId = get().disconnectedPeerId || get().peerId;
     if (!peerId) return;
+    const mode = get().connectionMode;
     set({ disconnectedPeerId: null, error: null });
-    get().connect(peerId);
+    get().connect(peerId, mode);
   },
 
   toggleScaleMode: () => {
