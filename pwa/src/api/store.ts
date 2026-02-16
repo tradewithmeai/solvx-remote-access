@@ -4,11 +4,12 @@
  */
 import { create } from 'zustand';
 import Long from 'long';
-import { Connection, type ConnectionStatus, type ConnectionEvents } from '../core/connection';
+import { Connection, type ConnectionStatus, type ConnectionEvents, type ConnectionMode } from '../core/connection';
 import type {
   PeerInfo, VideoFrame, CursorData, Display,
   FileEntry, FileTransferBlock, FileTransferDigest,
   FileTransferDone, FileTransferError,
+  TerminalOpened, TerminalData, TerminalClosed, TerminalError,
 } from '../core/protocol/types';
 import { AudioPlayer } from '../core/audio';
 
@@ -70,6 +71,11 @@ interface AppState {
   remoteEntries: FileEntry[];
   fileJobs: FileTransferJob[];
 
+  // Terminal
+  terminalSessions: Map<number, { id: number; status: 'opening' | 'open' | 'closed' | 'error'; error?: string }>;
+  activeTerminalId: number | null;
+  terminalDataHandler: ((terminalId: number, data: Uint8Array) => void) | null;
+
   // Peers
   recentPeers: Peer[];
   serverConfig: {
@@ -78,7 +84,8 @@ interface AppState {
   };
 
   // Actions
-  connect: (id: string) => void;
+  connectionMode: ConnectionMode;
+  connect: (id: string, mode?: ConnectionMode) => void;
   disconnect: () => void;
   submitPassword: (password: string, remember: boolean) => void;
   submit2FA: (code: string, trustDevice: boolean) => void;
@@ -95,6 +102,11 @@ interface AppState {
   uploadFiles: (files: File[]) => void;
   cancelFileJob: (id: number) => void;
 
+  // Terminal actions
+  openTerminal: (rows: number, cols: number) => number | null;
+  closeTerminalSession: (terminalId: number) => void;
+  setTerminalDataHandler: (handler: ((terminalId: number, data: Uint8Array) => void) | null) => void;
+
   // Improvement actions
   reconnect: () => void;
   toggleScaleMode: () => void;
@@ -104,6 +116,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   connection: null,
   audioPlayer: null,
+  connectionMode: 'both' as ConnectionMode,
   status: 'idle',
   statusDetail: '',
   peerId: '',
@@ -128,13 +141,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   remotePath: '',
   remoteEntries: [],
   fileJobs: [],
+  terminalSessions: new Map(),
+  activeTerminalId: null,
+  terminalDataHandler: null,
   recentPeers: [],
   serverConfig: {
     rendezvousServer: localStorage.getItem('custom-rendezvous-server') || '',
     key: localStorage.getItem('key') || '',
   },
 
-  connect: (id: string) => {
+  connect: (id: string, mode: ConnectionMode = 'both') => {
     const existing = get().connection;
     if (existing) existing.close();
     const existingAudio = get().audioPlayer;
@@ -279,12 +295,47 @@ export const useAppStore = create<AppState>((set, get) => ({
       onError: (title, message) => {
         set({ error: { title, message } });
       },
+      onTerminalOpened: (opened) => {
+        set(s => {
+          const sessions = new Map(s.terminalSessions);
+          const id = opened.terminal_id ?? 0;
+          sessions.set(id, {
+            id,
+            status: opened.success ? 'open' : 'error',
+            error: opened.success ? undefined : (opened.message || 'Failed to open terminal'),
+          });
+          return { terminalSessions: sessions, activeTerminalId: s.activeTerminalId ?? id };
+        });
+      },
+      onTerminalData: (data) => {
+        const handler = get().terminalDataHandler;
+        if (handler && data.data) {
+          handler(data.terminal_id ?? 0, data.data);
+        }
+      },
+      onTerminalClosed: (closed) => {
+        set(s => {
+          const sessions = new Map(s.terminalSessions);
+          const id = closed.terminal_id ?? 0;
+          sessions.set(id, { id, status: 'closed' });
+          return { terminalSessions: sessions };
+        });
+      },
+      onTerminalError: (err) => {
+        set(s => {
+          const sessions = new Map(s.terminalSessions);
+          const id = err.terminal_id ?? 0;
+          sessions.set(id, { id, status: 'error', error: err.message || 'Terminal error' });
+          return { terminalSessions: sessions };
+        });
+      },
     };
 
     const conn = new Connection(events);
     set({
       connection: conn,
       audioPlayer: audio,
+      connectionMode: mode,
       peerId: id,
       status: 'connecting',
       error: null,
@@ -296,7 +347,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentFrame: null,
       chatMessages: [],
     });
-    conn.connect(id);
+    conn.connect(id, mode);
   },
 
   disconnect: () => {
@@ -468,6 +519,36 @@ export const useAppStore = create<AppState>((set, get) => ({
     set(s => ({
       fileJobs: s.fileJobs.filter(j => j.id !== id),
     }));
+  },
+
+  openTerminal: (rows: number, cols: number) => {
+    const conn = get().connection;
+    if (!conn) return null;
+    const terminalId = conn.openTerminal(rows, cols);
+    set(s => {
+      const sessions = new Map(s.terminalSessions);
+      sessions.set(terminalId, { id: terminalId, status: 'opening' });
+      return { terminalSessions: sessions, activeTerminalId: s.activeTerminalId ?? terminalId };
+    });
+    return terminalId;
+  },
+
+  closeTerminalSession: (terminalId: number) => {
+    const conn = get().connection;
+    if (conn) conn.closeTerminal(terminalId);
+    set(s => {
+      const sessions = new Map(s.terminalSessions);
+      sessions.delete(terminalId);
+      const nextId = sessions.size > 0 ? sessions.keys().next().value ?? null : null;
+      return {
+        terminalSessions: sessions,
+        activeTerminalId: s.activeTerminalId === terminalId ? nextId : s.activeTerminalId,
+      };
+    });
+  },
+
+  setTerminalDataHandler: (handler) => {
+    set({ terminalDataHandler: handler });
   },
 
   reconnect: () => {

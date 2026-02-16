@@ -3,8 +3,11 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../../api/store';
 import { Toolbar } from '../components/Toolbar';
 import { FileTransferPanel } from '../components/FileTransferPanel';
+import { TerminalPanel } from '../components/TerminalPanel';
 import { mapChromeOSKey } from '../../chromeos/keyboard-shortcuts';
 import { VideoRenderer } from '../../core/video';
+
+type ViewMode = 'desktop' | 'terminal' | 'files';
 
 /**
  * Remote desktop view with canvas rendering, keyboard/mouse input.
@@ -16,14 +19,16 @@ export function RemotePage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<VideoRenderer | null>(null);
   const [currentDisplay, setCurrentDisplay] = useState(0);
+  const connMode = useAppStore(s => s.connectionMode);
+  const [viewMode, setViewMode] = useState<ViewMode>(connMode === 'terminal' ? 'terminal' : 'desktop');
 
   const {
     connection,
+    connectionMode,
     status,
     peerInfo,
     cursorData,
     currentFrame,
-    fileTransferOpen,
     latencyMs,
     fps,
     scaleMode,
@@ -37,6 +42,13 @@ export function RemotePage() {
     reconnect,
     dismissError,
   } = useAppStore();
+
+  // Trigger file dir read when switching to files tab
+  useEffect(() => {
+    if (viewMode === 'files' && connection && status === 'connected') {
+      openFileTransfer();
+    }
+  }, [viewMode, connection, status, openFileTransfer]);
 
   // Connect if not already connected
   useEffect(() => {
@@ -365,7 +377,7 @@ export function RemotePage() {
         }}
         onCtrlAltDel={() => connection?.sendCtrlAltDel()}
         onLockScreen={() => connection?.sendLockScreen()}
-        onFileTransfer={openFileTransfer}
+        onFileTransfer={() => setViewMode('files')}
         onRefresh={() => connection?.refresh()}
         onFullscreen={() => {
           containerRef.current?.requestFullscreen?.();
@@ -378,67 +390,106 @@ export function RemotePage() {
         currentDisplay={currentDisplay}
       />
 
-      {/* Canvas */}
-      <div className={`flex-1 flex items-center justify-center ${scaleMode === 'original' ? 'overflow-auto' : 'overflow-hidden'}`}>
+      {/* Tab Bar */}
+      {status === 'connected' && (
+        <div className="flex items-center bg-neutral-900 border-b border-neutral-700 shrink-0">
+          {(['desktop', 'terminal', 'files'] as ViewMode[]).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setViewMode(mode)}
+              className={`px-4 py-1.5 text-xs font-medium uppercase tracking-wider transition-colors ${
+                viewMode === mode
+                  ? 'text-white border-b-2 border-blue-500 bg-neutral-800'
+                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800'
+              }`}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Main Content */}
+      <div className="flex-1 min-h-0 flex flex-col">
         {isDisconnected ? (
-          <div className="text-center flex flex-col items-center gap-4">
-            <div className="text-red-400 text-lg font-medium">
-              {error?.title || 'Connection Lost'}
-            </div>
-            <p className="text-rustdesk-muted text-sm max-w-xs">
-              {error?.message || 'The connection to the remote desktop was interrupted.'}
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => {
-                  dismissError();
-                  reconnect();
-                }}
-                className="bg-rustdesk-primary hover:bg-blue-600 text-white px-6 py-2.5 rounded-lg font-medium transition-colors"
-              >
-                Reconnect
-              </button>
-              <button
-                onClick={() => {
-                  disconnect();
-                  navigate('/');
-                }}
-                className="border border-rustdesk-border text-rustdesk-muted hover:text-white px-6 py-2.5 rounded-lg transition-colors"
-              >
-                Back
-              </button>
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center flex flex-col items-center gap-4">
+              <div className="text-red-400 text-lg font-medium">
+                {error?.title || 'Connection Lost'}
+              </div>
+              <p className="text-rustdesk-muted text-sm max-w-xs">
+                {error?.message || 'The connection to the remote desktop was interrupted.'}
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    dismissError();
+                    reconnect();
+                  }}
+                  className="bg-rustdesk-primary hover:bg-blue-600 text-white px-6 py-2.5 rounded-lg font-medium transition-colors"
+                >
+                  Reconnect
+                </button>
+                <button
+                  onClick={() => {
+                    disconnect();
+                    navigate('/');
+                  }}
+                  className="border border-rustdesk-border text-rustdesk-muted hover:text-white px-6 py-2.5 rounded-lg transition-colors"
+                >
+                  Back
+                </button>
+              </div>
             </div>
           </div>
         ) : status === 'connecting' || status === 'authenticating' ? (
-          <div className="text-rustdesk-muted flex flex-col items-center gap-4">
-            <div className="w-8 h-8 border-2 border-rustdesk-primary border-t-transparent rounded-full animate-spin" />
-            <p className="text-sm">
-              {status === 'authenticating'
-                ? 'Authenticating...'
-                : 'Connecting...'}
-            </p>
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-rustdesk-muted flex flex-col items-center gap-4">
+              <div className="w-8 h-8 border-2 border-rustdesk-primary border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm">
+                {status === 'authenticating'
+                  ? 'Authenticating...'
+                  : 'Connecting...'}
+              </p>
+            </div>
           </div>
         ) : (
-          <canvas
-            ref={canvasRef}
-            width={1920}
-            height={1080}
-            className={canvasClass}
-            onMouseDown={handleMouseDown}
-            onMouseUp={handleMouseUp}
-            onMouseMove={handleMouseMove}
-            onWheel={handleWheel}
-            onContextMenu={handleContextMenu}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-            tabIndex={0}
-          />
+          <>
+            {/* Desktop View */}
+            <div className={`flex-1 items-center justify-center ${viewMode === 'desktop' ? 'flex' : 'hidden'} ${scaleMode === 'original' ? 'overflow-auto' : 'overflow-hidden'}`}>
+              <canvas
+                ref={canvasRef}
+                width={1920}
+                height={1080}
+                className={canvasClass}
+                onMouseDown={handleMouseDown}
+                onMouseUp={handleMouseUp}
+                onMouseMove={handleMouseMove}
+                onWheel={handleWheel}
+                onContextMenu={handleContextMenu}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                tabIndex={0}
+              />
+            </div>
+
+            {/* Terminal View */}
+            {viewMode === 'terminal' && (
+              <div className="flex-1 min-h-0">
+                <TerminalPanel />
+              </div>
+            )}
+
+            {/* Files View */}
+            {viewMode === 'files' && (
+              <div className="flex-1 min-h-0">
+                <FileTransferPanel />
+              </div>
+            )}
+          </>
         )}
       </div>
-
-      {/* File Transfer Panel */}
-      {fileTransferOpen && <FileTransferPanel />}
     </div>
   );
 }

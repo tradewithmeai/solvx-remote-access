@@ -80,6 +80,18 @@ export type FileTransferError = hbb.IFileTransferError;
 export const FileType = hbb.FileType;
 export type FileType = hbb.FileType;
 
+// === Terminal ===
+
+export type TerminalAction = hbb.ITerminalAction;
+export type TerminalResponse = hbb.ITerminalResponse;
+export type OpenTerminal = hbb.IOpenTerminal;
+export type TerminalData = hbb.ITerminalData;
+export type ResizeTerminal = hbb.IResizeTerminal;
+export type CloseTerminal = hbb.ICloseTerminal;
+export type TerminalOpened = hbb.ITerminalOpened;
+export type TerminalClosed = hbb.ITerminalClosed;
+export type TerminalError = hbb.ITerminalError;
+
 // Re-export the class constructors for encode/decode
 export const MessageClass = hbb.Message;
 export const RendezvousMessageClass = hbb.RendezvousMessage;

@@ -75,17 +75,22 @@ export function SettingsPage() {
             About
           </h2>
           <div className="bg-rustdesk-surface border border-rustdesk-border rounded-lg p-4 space-y-2 text-sm">
-            <p className="text-rustdesk-text">
-              RustDesk PWA Client
+            <p className="text-rustdesk-text font-medium">
+              Solvx v2.0.0
             </p>
             <p className="text-rustdesk-muted">
-              Open-source remote desktop client optimized for ChromeOS.
-              Client-only: connect to remote machines running RustDesk.
+              Unified remote desktop and terminal client for ChromeOS.
+              Connect to remote machines via RustDesk relay for both desktop
+              and terminal access through a single encrypted connection.
             </p>
             <p className="text-rustdesk-muted text-xs mt-3">
-              This PWA connects via WebSocket to your RustDesk relay server.
-              Ensure WSS (WebSocket Secure) is configured on ports 21118/21119.
+              Connects via WSS to your RustDesk relay server (ports 21118/21119).
             </p>
+            <div className="border-t border-rustdesk-border/30 pt-3 mt-3 space-y-1 text-xs text-rustdesk-muted/70">
+              <p>Built on open-source technologies:</p>
+              <p>Desktop protocol: <a href="https://github.com/rustdesk/rustdesk" className="text-emerald-400 hover:underline" target="_blank" rel="noopener noreferrer">RustDesk</a> (AGPL-3.0)</p>
+              <p>Terminal: <a href="https://xtermjs.org" className="text-emerald-400 hover:underline" target="_blank" rel="noopener noreferrer">xterm.js</a> (MIT)</p>
+            </div>
           </div>
         </section>
 

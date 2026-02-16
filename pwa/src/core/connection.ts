@@ -23,6 +23,10 @@ import {
   type FileTransferDigest,
   type FileTransferDone,
   type FileTransferError,
+  type TerminalOpened,
+  type TerminalData,
+  type TerminalClosed,
+  type TerminalError,
   ControlKey,
   ImageQuality,
   BoolOption,
@@ -33,6 +37,7 @@ import {
 } from './protocol/types';
 import Long from 'long';
 import * as sha256Module from 'fast-sha256';
+import { encryptForStorage, decryptFromStorage } from './secure-storage';
 
 const DEFAULT_RENDEZVOUS_PORT = 21116;
 const DEFAULT_HOSTS = [
@@ -41,6 +46,8 @@ const DEFAULT_HOSTS = [
 
 // RustDesk's public signing key for verifying relay server identity
 const RS_PUBLIC_KEY = 'OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=';
+
+export type ConnectionMode = 'desktop' | 'terminal' | 'both';
 
 export type ConnectionStatus =
   | 'idle'
@@ -72,6 +79,12 @@ export interface ConnectionEvents {
   onFileTransferError: (err: FileTransferError) => void;
   onLatency: (ms: number) => void;
   onError: (title: string, message: string) => void;
+
+  // Terminal
+  onTerminalOpened: (opened: TerminalOpened) => void;
+  onTerminalData: (data: TerminalData) => void;
+  onTerminalClosed: (closed: TerminalClosed) => void;
+  onTerminalError: (err: TerminalError) => void;
 }
 
 export class Connection {
@@ -89,23 +102,38 @@ export class Connection {
   private adaptiveInterval: ReturnType<typeof setInterval> | null = null;
   private recentLatencies: number[] = [];
   private currentQuality: string = 'balanced';
+  private mode: ConnectionMode = 'both';
 
   constructor(events: ConnectionEvents) {
     this.events = events;
   }
 
-  async connect(id: string) {
+  async connect(id: string, mode: ConnectionMode = 'both') {
+    // Refuse to connect over insecure origins (except localhost for development)
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      this.events.onError('Security Error', 'HTTPS is required for secure connections. Please use HTTPS.');
+      this.events.onStatus('error');
+      return;
+    }
+
     this.id = id;
+    this.mode = mode;
     this.closed = false;
 
     // Load saved options for this peer
     this.options = this.loadPeerOptions(id);
 
-    // Try saved password
+    // Try saved password (encrypted in localStorage)
     const savedPw = this.options['password'];
     if (savedPw) {
       try {
-        this.password = Uint8Array.from(JSON.parse('[' + savedPw + ']'));
+        const decrypted = await decryptFromStorage(savedPw);
+        if (decrypted) {
+          this.password = Uint8Array.from(JSON.parse('[' + decrypted + ']'));
+        } else {
+          // Fallback: try reading as legacy plaintext format
+          this.password = Uint8Array.from(JSON.parse('[' + savedPw + ']'));
+        }
       } catch {
         this.password = null;
       }
@@ -373,6 +401,11 @@ export class Connection {
           }
         } else if (r.peer_info) {
           this.handlePeerInfo(r.peer_info);
+          // Clear password from memory after successful auth
+          if (this.password) {
+            this.password.fill(0);
+            this.password = null;
+          }
         }
       } else if (msg.video_frame) {
         if (!this.firstFrame) {
@@ -409,6 +442,8 @@ export class Connection {
         if (msg.audio_frame.data) this.events.onAudioFrame(msg.audio_frame.data);
       } else if (msg.file_response) {
         this.handleFileResponse(msg.file_response);
+      } else if (msg.terminal_response) {
+        this.handleTerminalResponse(msg.terminal_response);
       }
     }
   }
@@ -432,18 +467,40 @@ export class Connection {
     }
   }
 
+  private async handleTerminalResponse(tr: NonNullable<Message['terminal_response']>) {
+    if (tr.opened) {
+      this.events.onTerminalOpened(tr.opened as TerminalOpened);
+    } else if (tr.data) {
+      const td = tr.data;
+      if (td.data && td.compressed) {
+        const decompressed = await decompress(td.data);
+        if (decompressed) {
+          this.events.onTerminalData({ ...td, data: decompressed });
+        }
+      } else if (td.data) {
+        this.events.onTerminalData(td as TerminalData);
+      }
+    } else if (tr.closed) {
+      this.events.onTerminalClosed(tr.closed as TerminalClosed);
+    } else if (tr.error) {
+      this.events.onTerminalError(tr.error as TerminalError);
+    }
+  }
+
   private handlePeerInfo(pi: PeerInfo) {
     this.peerInfo = pi;
-    if (!pi.displays?.length) {
+    if (!pi.displays?.length && this.mode !== 'terminal') {
       this.events.onError('Remote Error', 'No display available');
       return;
     }
     this.events.onPeerInfo(pi);
 
-    // Save peer info
+    // Save peer info (encrypt password before storing)
     if (this.password?.length) {
       if (this.options['remember']) {
-        this.setOption('password', this.password.toString());
+        encryptForStorage(this.password.toString()).then(encrypted => {
+          this.setOption('password', encrypted);
+        }).catch(() => {});
       }
     }
     this.setOption('info', pi);
@@ -499,7 +556,7 @@ export class Connection {
       login_request: {
         username: this.id,
         my_id: 'web',
-        my_name: 'RustDesk PWA',
+        my_name: 'Solvx',
         password,
         option: this.buildOptionMessage(),
         video_ack_required: true,
@@ -627,6 +684,38 @@ export class Connection {
     return id;
   }
 
+  // === Terminal API ===
+
+  private nextTerminalId = 1;
+
+  openTerminal(rows: number, cols: number): number {
+    const terminalId = this.nextTerminalId++;
+    this.ws?.sendMessage({
+      terminal_action: { open: { terminal_id: terminalId, rows, cols } },
+    });
+    return terminalId;
+  }
+
+  sendTerminalData(terminalId: number, data: string) {
+    this.ws?.sendMessage({
+      terminal_action: {
+        data: { terminal_id: terminalId, data: new TextEncoder().encode(data) },
+      },
+    });
+  }
+
+  resizeTerminal(terminalId: number, rows: number, cols: number) {
+    this.ws?.sendMessage({
+      terminal_action: { resize: { terminal_id: terminalId, rows, cols } },
+    });
+  }
+
+  closeTerminal(terminalId: number) {
+    this.ws?.sendMessage({
+      terminal_action: { close: { terminal_id: terminalId } },
+    });
+  }
+
   // === File Transfer API ===
 
   private fileTransferId = 0;
@@ -743,10 +832,15 @@ export class Connection {
   }
 
   async reconnect() {
+    const mode = this.mode;
     this.close();
     this.closed = false;
     this.firstFrame = false;
-    await this.connect(this.id);
+    await this.connect(this.id, mode);
+  }
+
+  get connectionMode(): ConnectionMode {
+    return this.mode;
   }
 
   private startAdaptiveQuality() {
@@ -809,7 +903,7 @@ export class Connection {
       return 'wss://' + hostname + path;
     }
 
-    const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const scheme = 'wss://';
     if (host.includes(':')) {
       const [h, p] = host.split(':');
       const port = parseInt(p) + (isRelay ? (relayOffset || 3) : 2);

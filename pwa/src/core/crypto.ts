@@ -39,7 +39,10 @@ export function seal(
   theirPk: Uint8Array,
   ourSk: Uint8Array
 ): Uint8Array {
-  const nonce = new Uint8Array(24); // zeros
+  // Zero nonce is a protocol constraint — the Rust server (tcp.rs:331) uses the
+  // same: box_::Nonce([0u8; box_::NONCEBYTES]). This is safe because ephemeral
+  // keypairs are generated per connection, so the same key+nonce pair is never reused.
+  const nonce = new Uint8Array(24);
   return sodium.crypto_box_easy(plaintext, nonce, theirPk, ourSk);
 }
 

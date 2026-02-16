@@ -1,12 +1,20 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAppStore } from '../../api/store';
+import type { ConnectionMode } from '../../core/connection';
 import { PasswordDialog } from '../components/PasswordDialog';
 import { TwoFADialog } from '../components/TwoFADialog';
 import { PeerCard } from '../components/PeerCard';
 
+const MODES: { value: ConnectionMode; label: string; desc: string }[] = [
+  { value: 'both', label: 'Desktop + Terminal', desc: 'Full access with remote desktop and terminal' },
+  { value: 'desktop', label: 'Desktop Only', desc: 'Remote desktop view only' },
+  { value: 'terminal', label: 'Terminal Only', desc: 'Lightweight terminal-only connection' },
+];
+
 export function ConnectPage() {
   const [remoteId, setRemoteId] = useState('');
+  const [mode, setMode] = useState<ConnectionMode>('both');
   const navigate = useNavigate();
   const {
     status,
@@ -41,7 +49,7 @@ export function ConnectPage() {
   const handleConnect = () => {
     const id = remoteId.trim().replace(/\s+/g, ' ');
     if (!id) return;
-    connect(id);
+    connect(id, mode);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -55,10 +63,10 @@ export function ConnectPage() {
       {/* Header */}
       <header className="border-b border-rustdesk-border px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-rustdesk-primary rounded-lg flex items-center justify-center text-white font-bold text-sm">
-            RD
+          <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center text-white font-bold text-sm">
+            Sx
           </div>
-          <h1 className="text-lg font-semibold text-white">RustDesk</h1>
+          <h1 className="text-lg font-semibold text-white">Solvx</h1>
         </div>
         <Link
           to="/settings"
@@ -99,6 +107,25 @@ export function ConnectPage() {
                 {isConnecting ? 'Cancel' : 'Connect'}
               </button>
             </div>
+          </div>
+
+          {/* Connection mode */}
+          <div className="flex gap-1 bg-rustdesk-surface rounded-lg p-1 border border-rustdesk-border">
+            {MODES.map(m => (
+              <button
+                key={m.value}
+                onClick={() => setMode(m.value)}
+                disabled={isConnecting}
+                className={`flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                  mode === m.value
+                    ? 'bg-rustdesk-primary text-white'
+                    : 'text-rustdesk-muted hover:text-white'
+                } disabled:opacity-50`}
+                title={m.desc}
+              >
+                {m.label}
+              </button>
+            ))}
           </div>
 
           {/* Status */}
@@ -145,7 +172,7 @@ export function ConnectPage() {
                     peer={peer}
                     onConnect={() => {
                       setRemoteId(peer.id);
-                      connect(peer.id);
+                      connect(peer.id, mode);
                     }}
                   />
                 ))}
@@ -157,7 +184,7 @@ export function ConnectPage() {
 
       {/* Footer */}
       <footer className="border-t border-rustdesk-border px-6 py-3 text-center text-xs text-rustdesk-muted/50">
-        RustDesk PWA Client &middot; Open Source Remote Desktop
+        Solvx &middot; Remote Desktop + Terminal
       </footer>
 
       {/* Password dialog */}

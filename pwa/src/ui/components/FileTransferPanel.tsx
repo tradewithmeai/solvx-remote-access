@@ -31,7 +31,6 @@ export function FileTransferPanel() {
     downloadFile,
     uploadFiles,
     cancelFileJob,
-    closeFileTransfer,
   } = useAppStore();
 
   const pathParts = remotePath ? remotePath.split(/[/\\]/).filter(Boolean) : [];
@@ -72,17 +71,10 @@ export function FileTransferPanel() {
   });
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="bg-rustdesk-surface border border-rustdesk-border rounded-xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col">
+    <div className="h-full flex flex-col bg-rustdesk-surface">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-rustdesk-border">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-rustdesk-border shrink-0">
           <h2 className="text-white font-semibold">File Transfer</h2>
-          <button
-            onClick={closeFileTransfer}
-            className="text-rustdesk-muted hover:text-white transition-colors"
-          >
-            Close
-          </button>
         </div>
 
         {/* Path bar */}
@@ -183,7 +175,6 @@ export function FileTransferPanel() {
             ))}
           </div>
         )}
-      </div>
     </div>
   );
 }
