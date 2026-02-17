@@ -103,8 +103,8 @@ export function RemotePage() {
     try {
       const width = cursorData.width ?? 0;
       const height = cursorData.height ?? 0;
-      const hotx = cursorData.hotx ?? 0;
-      const hoty = cursorData.hoty ?? 0;
+      const hotx = Math.max(0, Math.min(width, Math.floor(cursorData.hotx ?? 0)));
+      const hoty = Math.max(0, Math.min(height, Math.floor(cursorData.hoty ?? 0)));
       const colors = cursorData.colors;
       if (!width || !height || !colors) return;
       const cursorCanvas = document.createElement('canvas');

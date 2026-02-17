@@ -117,7 +117,7 @@ export class VideoRenderer {
     try {
       this.decoder.configure(config);
       this.currentCodec = codec;
-      console.log('Video decoder configured for', codec);
+      // Decoder configured
     } catch (e) {
       console.error(`Failed to configure ${codec}:`, e);
       this.decoder.close();

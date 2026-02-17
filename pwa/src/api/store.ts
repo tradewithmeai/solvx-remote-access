@@ -288,7 +288,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = job.name;
+          // Sanitize filename: strip path separators and control characters
+          a.download = job.name.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_');
           a.click();
           URL.revokeObjectURL(url);
         }

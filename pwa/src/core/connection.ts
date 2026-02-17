@@ -129,10 +129,15 @@ export class Connection {
       try {
         const decrypted = await decryptFromStorage(savedPw);
         if (decrypted) {
-          this.password = Uint8Array.from(JSON.parse('[' + decrypted + ']'));
+          const parsed = JSON.parse(decrypted);
+          if (Array.isArray(parsed) && parsed.every((v: unknown) => typeof v === 'number' && v >= 0 && v <= 255)) {
+            this.password = Uint8Array.from(parsed);
+          } else {
+            this.password = null;
+          }
         } else {
-          // Fallback: try reading as legacy plaintext format
-          this.password = Uint8Array.from(JSON.parse('[' + savedPw + ']'));
+          // Decryption failed — require user to re-enter password
+          this.password = null;
         }
       } catch {
         this.password = null;
@@ -173,7 +178,6 @@ export class Connection {
         licence_key: localStorage.getItem('key') || undefined,
         conn_type: ConnType.DEFAULT_CONN,
         nat_type: NatType.SYMMETRIC,
-        token: localStorage.getItem('access_token') || undefined,
       },
     });
 
@@ -216,7 +220,7 @@ export class Connection {
     let lastRr: RendezvousMessage['relay_response'] = null;
 
     for (let i = 1; i <= 3; i++) {
-      uuid = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+      uuid = globalThis.crypto.randomUUID();
       const rdvUri = this.getRendezvousUri();
       const rdvWs = new Websock(rdvUri, true);
 
@@ -228,7 +232,6 @@ export class Connection {
             uuid,
             relay_server: relayServer || undefined,
             licence_key: localStorage.getItem('key') || undefined,
-            token: localStorage.getItem('access_token') || undefined,
           },
         });
 
@@ -266,9 +269,12 @@ export class Connection {
 
   private async connectRelay(rr: NonNullable<RendezvousMessage['relay_response']>) {
     const pk = rr.pk;
-    let uri = rr.relay_server
-      ? this.makeUri(rr.relay_server, true, 2)
-      : this.getRendezvousUri(true);
+    let uri: string;
+    if (rr.relay_server && this.isAllowedRelayServer(rr.relay_server)) {
+      uri = this.makeUri(rr.relay_server, true, 2);
+    } else {
+      uri = this.getRendezvousUri(true);
+    }
 
     this.events.onStatus('connecting', 'Connecting to relay server...');
     const ws = new Websock(uri, false);
@@ -505,7 +511,7 @@ export class Connection {
     // Save peer info (encrypt password before storing)
     if (this.password?.length) {
       if (this.options['remember']) {
-        encryptForStorage(this.password.toString()).then(encrypted => {
+        encryptForStorage(JSON.stringify(Array.from(this.password))).then(encrypted => {
           this.setOption('password', encrypted);
         }).catch(() => {});
       }
@@ -685,7 +691,7 @@ export class Connection {
   private getDeviceId(): string {
     let id = localStorage.getItem('device-id');
     if (!id) {
-      id = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+      id = globalThis.crypto.randomUUID();
       localStorage.setItem('device-id', id);
     }
     return id;
@@ -893,6 +899,20 @@ export class Connection {
       localStorage.getItem('rendezvous-server') ||
       DEFAULT_HOSTS[0];
     return this.makeUri(host, isRelay);
+  }
+
+  /** Validate that a server-supplied relay address belongs to a trusted domain. */
+  private isAllowedRelayServer(host: string): boolean {
+    const hostname = host.split(':')[0].toLowerCase();
+    // Allow IP addresses (relay within same infrastructure)
+    if (this.isIpAddress(hostname)) return true;
+    // Allow if it matches or is a subdomain of the configured rendezvous server
+    const configuredHost = (
+      localStorage.getItem('custom-rendezvous-server') ||
+      localStorage.getItem('rendezvous-server') ||
+      DEFAULT_HOSTS[0]
+    ).split(':')[0].toLowerCase();
+    return hostname === configuredHost || hostname.endsWith('.' + configuredHost);
   }
 
   private makeUri(host: string, isRelay = false, relayOffset = 0): string {

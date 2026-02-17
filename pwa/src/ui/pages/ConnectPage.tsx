@@ -47,8 +47,8 @@ export function ConnectPage() {
   }, [status, remoteId, navigate]);
 
   const handleConnect = () => {
-    const id = remoteId.trim().replace(/\s+/g, ' ');
-    if (!id) return;
+    const id = remoteId.trim().replace(/\s+/g, '');
+    if (!id || id.length > 64) return;
     connect(id, mode);
   };
 
@@ -89,6 +89,7 @@ export function ConnectPage() {
                 type="text"
                 value={remoteId}
                 onChange={e => setRemoteId(e.target.value)}
+                maxLength={64}
                 onKeyDown={handleKeyDown}
                 placeholder="Enter ID or IP address"
                 disabled={isConnecting}

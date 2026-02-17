@@ -56,7 +56,7 @@ export function mapKey(name: string): Partial<KeyEvent> | null {
     return { control_key: controlKey };
   }
 
-  console.warn('Unknown key:', name, '->', mapped);
+  // Unmapped key — ignored
   return null;
 }
 
