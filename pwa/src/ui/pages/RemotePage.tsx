@@ -9,6 +9,9 @@ import { VideoRenderer } from '../../core/video';
 
 type ViewMode = 'desktop' | 'terminal' | 'files';
 
+// Track which panels have been activated so we mount them lazily but keep them alive
+
+
 /**
  * Remote desktop view with canvas rendering, keyboard/mouse input.
  */
@@ -21,6 +24,8 @@ export function RemotePage() {
   const [currentDisplay, setCurrentDisplay] = useState(0);
   const connMode = useAppStore(s => s.connectionMode);
   const [viewMode, setViewMode] = useState<ViewMode>(connMode === 'terminal' ? 'terminal' : 'desktop');
+  // Track which panels have been visited so we mount them lazily but never unmount
+  const [mountedPanels, setMountedPanels] = useState<Set<ViewMode>>(() => new Set([connMode === 'terminal' ? 'terminal' : 'desktop']));
 
   const {
     connection,
@@ -42,6 +47,17 @@ export function RemotePage() {
     reconnect,
     dismissError,
   } = useAppStore();
+
+  // When switching view modes, track which panels have been mounted
+  const handleViewMode = useCallback((mode: ViewMode) => {
+    setViewMode(mode);
+    setMountedPanels(prev => {
+      if (prev.has(mode)) return prev;
+      const next = new Set(prev);
+      next.add(mode);
+      return next;
+    });
+  }, []);
 
   // Trigger file dir read when switching to files tab
   useEffect(() => {
@@ -383,7 +399,7 @@ export function RemotePage() {
         }}
         onCtrlAltDel={() => connection?.sendCtrlAltDel()}
         onLockScreen={() => connection?.sendLockScreen()}
-        onFileTransfer={() => setViewMode('files')}
+        onFileTransfer={() => handleViewMode('files')}
         onRefresh={() => connection?.refresh()}
         onFullscreen={() => {
           containerRef.current?.requestFullscreen?.();
@@ -402,7 +418,7 @@ export function RemotePage() {
           {(['desktop', 'terminal', 'files'] as ViewMode[]).map((mode) => (
             <button
               key={mode}
-              onClick={() => setViewMode(mode)}
+              onClick={() => handleViewMode(mode)}
               className={`px-4 py-1.5 text-xs font-medium uppercase tracking-wider transition-colors ${
                 viewMode === mode
                   ? 'text-white border-b-2 border-blue-500 bg-neutral-800'
@@ -480,16 +496,16 @@ export function RemotePage() {
               />
             </div>
 
-            {/* Terminal View */}
-            {viewMode === 'terminal' && (
-              <div className="flex-1 min-h-0">
+            {/* Terminal View — mount once activated, hide when inactive */}
+            {mountedPanels.has('terminal') && (
+              <div className={`flex-1 min-h-0 ${viewMode === 'terminal' ? '' : 'hidden'}`}>
                 <TerminalPanel />
               </div>
             )}
 
-            {/* Files View */}
-            {viewMode === 'files' && (
-              <div className="flex-1 min-h-0">
+            {/* Files View — mount once activated, hide when inactive */}
+            {mountedPanels.has('files') && (
+              <div className={`flex-1 min-h-0 ${viewMode === 'files' ? '' : 'hidden'}`}>
                 <FileTransferPanel />
               </div>
             )}

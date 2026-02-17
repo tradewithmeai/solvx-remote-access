@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import Long from 'long';
 import { useAppStore, type FileTransferJob } from '../../api/store';
 import type { FileEntry } from '../../core/protocol/types';
@@ -23,6 +23,7 @@ function isDir(entry: FileEntry): boolean {
 
 export function FileTransferPanel() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [loading, setLoading] = useState(false);
   const {
     remotePath,
     remoteEntries,
@@ -33,21 +34,36 @@ export function FileTransferPanel() {
     cancelFileJob,
   } = useAppStore();
 
-  const pathParts = remotePath ? remotePath.split(/[/\\]/).filter(Boolean) : [];
   const sep = remotePath.includes('\\') ? '\\' : '/';
+  const pathParts = remotePath ? remotePath.split(/[/\\]/).filter(Boolean) : [];
+
+  const navigate = (path: string) => {
+    setLoading(true);
+    browseRemoteDir(path);
+    // Clear loading after a delay (the store update will re-render with entries)
+    setTimeout(() => setLoading(false), 3000);
+  };
 
   const handleNavigateUp = () => {
     if (pathParts.length <= 1) {
-      browseRemoteDir('');
+      navigate('');
     } else {
-      browseRemoteDir(pathParts.slice(0, -1).join(sep));
+      navigate(pathParts.slice(0, -1).join(sep));
+    }
+  };
+
+  const handleBreadcrumb = (index: number) => {
+    if (index < 0) {
+      navigate('');
+    } else {
+      navigate(pathParts.slice(0, index + 1).join(sep));
     }
   };
 
   const handleEntryClick = (entry: FileEntry) => {
     if (isDir(entry)) {
       const newPath = remotePath ? remotePath + sep + entry.name : entry.name || '';
-      browseRemoteDir(newPath);
+      navigate(newPath);
     }
   };
 
@@ -63,6 +79,17 @@ export function FileTransferPanel() {
     e.target.value = '';
   };
 
+  const handleRefresh = () => {
+    navigate(remotePath);
+  };
+
+  // Clear loading when entries change
+  const prevEntriesRef = useRef(remoteEntries);
+  if (remoteEntries !== prevEntriesRef.current) {
+    prevEntriesRef.current = remoteEntries;
+    if (loading) setLoading(false);
+  }
+
   const sortedEntries = [...remoteEntries].sort((a, b) => {
     const aDir = isDir(a);
     const bDir = isDir(b);
@@ -75,40 +102,74 @@ export function FileTransferPanel() {
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-rustdesk-border shrink-0">
           <h2 className="text-white font-semibold">File Transfer</h2>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={loading}
+              className="text-rustdesk-muted hover:text-white disabled:opacity-30 text-xs px-2 py-1 border border-rustdesk-border rounded transition-colors"
+            >
+              Refresh
+            </button>
+            <button
+              onClick={handleUpload}
+              className="bg-rustdesk-primary hover:bg-blue-600 text-white text-xs px-3 py-1.5 rounded transition-colors"
+            >
+              Upload
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              onChange={handleFileSelected}
+              className="hidden"
+            />
+          </div>
         </div>
 
-        {/* Path bar */}
-        <div className="flex items-center gap-2 px-4 py-2 bg-rustdesk-dark/50 border-b border-rustdesk-border">
+        {/* Breadcrumb path bar */}
+        <div className="flex items-center gap-1 px-4 py-2 bg-rustdesk-dark/50 border-b border-rustdesk-border overflow-x-auto shrink-0">
           <button
             onClick={handleNavigateUp}
             disabled={!remotePath}
-            className="text-rustdesk-muted hover:text-white disabled:opacity-30 text-sm px-2 py-1"
+            className="text-rustdesk-muted hover:text-white disabled:opacity-30 text-sm px-2 py-0.5 shrink-0"
+            title="Go up"
           >
             ..
           </button>
-          <div className="flex-1 text-sm text-rustdesk-muted font-mono truncate">
-            {remotePath || '(root)'}
-          </div>
+          <span className="text-rustdesk-muted/40 shrink-0">/</span>
           <button
-            onClick={handleUpload}
-            className="bg-rustdesk-primary hover:bg-blue-600 text-white text-xs px-3 py-1.5 rounded transition-colors"
+            onClick={() => handleBreadcrumb(-1)}
+            className="text-blue-400 hover:text-blue-300 text-sm px-1 py-0.5 shrink-0"
           >
-            Upload
+            root
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            onChange={handleFileSelected}
-            className="hidden"
-          />
+          {pathParts.map((part, i) => (
+            <span key={i} className="flex items-center gap-1 shrink-0">
+              <span className="text-rustdesk-muted/40">{sep}</span>
+              <button
+                onClick={() => handleBreadcrumb(i)}
+                className={`text-sm px-1 py-0.5 ${
+                  i === pathParts.length - 1
+                    ? 'text-white font-medium'
+                    : 'text-blue-400 hover:text-blue-300'
+                }`}
+              >
+                {part}
+              </button>
+            </span>
+          ))}
         </div>
 
         {/* File list */}
         <div className="flex-1 overflow-y-auto min-h-0">
-          {sortedEntries.length === 0 ? (
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="w-5 h-5 border-2 border-rustdesk-primary border-t-transparent rounded-full animate-spin" />
+              <span className="text-rustdesk-muted text-sm ml-3">Loading...</span>
+            </div>
+          ) : sortedEntries.length === 0 ? (
             <div className="text-center text-rustdesk-muted/50 py-12 text-sm">
-              Empty directory
+              {remotePath ? 'Empty directory' : 'No drives or directories available'}
             </div>
           ) : (
             <table className="w-full text-sm">

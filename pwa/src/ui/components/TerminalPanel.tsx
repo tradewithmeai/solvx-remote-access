@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -11,8 +11,10 @@ export function TerminalPanel() {
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalIdRef = useRef<number | null>(null);
+  const [terminalError, setTerminalError] = useState<string | null>(null);
 
   const connection = useAppStore(s => s.connection);
+  const terminalSessions = useAppStore(s => s.terminalSessions);
   const openTerminal = useAppStore(s => s.openTerminal);
   const setTerminalDataHandler = useAppStore(s => s.setTerminalDataHandler);
 
@@ -65,6 +67,7 @@ export function TerminalPanel() {
     });
 
     // Open terminal session on the remote peer
+    term.writeln('\x1b[90mOpening terminal session...\x1b[0m');
     const { cols, rows } = term;
     const tId = openTerminal(rows, cols);
     terminalIdRef.current = tId;
@@ -111,6 +114,16 @@ export function TerminalPanel() {
     };
   }, [connection, openTerminal, setTerminalDataHandler]);
 
+  // Watch for terminal session errors
+  useEffect(() => {
+    if (terminalIdRef.current == null) return;
+    const session = terminalSessions.get(terminalIdRef.current);
+    if (session?.status === 'error' && session.error) {
+      setTerminalError(session.error);
+      xtermRef.current?.writeln(`\r\n\x1b[31mTerminal error: ${session.error}\x1b[0m`);
+    }
+  }, [terminalSessions]);
+
   const handleTouchBarSend = useCallback((data: string) => {
     if (terminalIdRef.current != null && connection) {
       connection.sendTerminalData(terminalIdRef.current, data);
@@ -120,6 +133,14 @@ export function TerminalPanel() {
 
   return (
     <div className="flex flex-col h-full bg-[#1a1a2e]">
+      {terminalError && (
+        <div className="bg-red-900/30 border-b border-red-700 px-4 py-2 text-sm text-red-400 flex items-center justify-between shrink-0">
+          <span>{terminalError}</span>
+          <button onClick={() => setTerminalError(null)} className="text-red-400 hover:text-red-300 ml-2">
+            x
+          </button>
+        </div>
+      )}
       <div ref={termRef} className="flex-1 min-h-0" />
       <TouchBar onSend={handleTouchBarSend} />
     </div>
