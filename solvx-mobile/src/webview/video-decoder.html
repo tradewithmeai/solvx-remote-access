@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
+canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+video { display: none; width: 100%; height: 100%; object-fit: contain; background: #000; }
+#s { position: absolute; top: 8px; left: 8px; color: #10b981; font: 12px monospace; z-index: 10; opacity: 0.8; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="s">Loading...</div>
+<canvas id="c"></canvas>
+<video id="v" muted autoplay playsinline></video>
+<script>
+var C = document.getElementById('c');
+var V = document.getElementById('v');
+var G = C.getContext('2d', { alpha: false });
+var S = document.getElementById('s');
+var W = 0, H = 0, fc = 0, lt = performance.now(), fps = 0;
+var mode = 'none';
+
+// WebCodecs
+var wcd = null, wcc = '';
+var WC = {
+  vp9:  { codec: 'vp09.00.10.08', hardwareAcceleration: 'prefer-hardware' },
+  h264: { codec: 'avc1.42001E',   hardwareAcceleration: 'prefer-hardware' },
+  h265: { codec: 'hev1.1.6.L93.B0', hardwareAcceleration: 'prefer-hardware' },
+  av1:  { codec: 'av01.0.04M.08', hardwareAcceleration: 'prefer-hardware' },
+};
+
+function b64(s) {
+  var b = atob(s), a = new Uint8Array(b.length);
+  for (var i = 0; i < b.length; i++) a[i] = b.charCodeAt(i);
+  return a;
+}
+
+function post(o) { if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(o)); }
+
+function tfps() {
+  fc++;
+  var n = performance.now();
+  if (n - lt >= 1000) { fps = fc; fc = 0; lt = n; S.textContent = fps + ' fps | ' + W + 'x' + H + ' [' + mode + ']'; }
+}
+
+// === WebCodecs path ===
+function wcSwitch(codec) {
+  if (wcd && wcd.state !== 'closed') try { wcd.close(); } catch(e) {}
+  if (!WC[codec]) return false;
+  wcd = new VideoDecoder({
+    output: function(f) {
+      var w = f.displayWidth, h = f.displayHeight;
+      if (C.width !== w || C.height !== h) { C.width = w; C.height = h; W = w; H = h; post({type:'resize',width:w,height:h}); }
+      G.drawImage(f, 0, 0); f.close(); tfps();
+    },
+    error: function(e) { S.textContent = 'WC err: ' + e.message; }
+  });
+  wcd.configure(WC[codec]); wcc = codec;
+  return true;
+}
+
+// === MSE path (H264 only) ===
+var ms = null, mb = null, mq = [], mready = false, minit = false;
+var mts = 0, sps = null, pps = null, mseq = 1;
+
+function mseInit() {
+  if (!window.MediaSource) return false;
+  ms = new MediaSource();
+  V.src = URL.createObjectURL(ms);
+  V.style.display = 'block'; C.style.display = 'none';
+  ms.addEventListener('sourceopen', function() {
+    try {
+      mb = ms.addSourceBuffer('video/mp4; codecs="avc1.42001E"');
+      mb.mode = 'sequence';
+      mb.addEventListener('updateend', mFlush);
+      mb.addEventListener('error', function(e) { post({type:'error',message:'SourceBuffer error: '+e}); });
+      mready = true; mFlush();
+      post({type:'debug',message:'MSE: sourceopen, buffer ready'});
+    } catch(e) { S.textContent = 'MSE err: ' + e.message; }
+  });
+  V.addEventListener('loadedmetadata', function() { W = V.videoWidth; H = V.videoHeight; post({type:'resize',width:W,height:H}); post({type:'debug',message:'MSE: video metadata '+W+'x'+H}); });
+  V.addEventListener('error', function() { post({type:'error',message:'Video error: '+(V.error?V.error.code+' '+V.error.message:'unknown')}); });
+  return true;
+}
+
+var _played = false;
+function mFlush() {
+  if (!mb || mb.updating || mq.length === 0) return;
+  try { mb.appendBuffer(mq.shift()); } catch(e) {
+    if (e.name === 'QuotaExceededError' && !mb.updating) {
+      try { var b = mb.buffered; if (b.length > 0) mb.remove(0, b.end(b.length-1)-2); } catch(e2) {}
+    } else {
+      post({type:'error',message:'appendBuffer: '+e.name+' '+e.message});
+    }
+  }
+  if (!_played && V.readyState >= 2) {
+    _played = true;
+    V.play().catch(function(e) { post({type:'error',message:'play() failed: '+e.message}); });
+  }
+}
+
+function parseNALU(d) {
+  var r = [], i = 0;
+  while (i < d.length - 3) {
+    if (d[i]===0 && d[i+1]===0) {
+      var sl; if (d[i+2]===1) sl=3; else if (d[i+2]===0 && i+3<d.length && d[i+3]===1) sl=4; else { i++; continue; }
+      var s = i+sl, e = d.length;
+      for (var j=s+1; j<d.length-2; j++) { if (d[j]===0 && d[j+1]===0 && (d[j+2]===1 || (d[j+2]===0 && j+3<d.length && d[j+3]===1))) { e=j; break; } }
+      r.push(d.slice(s, e)); i = e;
+    } else i++;
+  }
+  return r;
+}
+
+function bx(t, p) {
+  var s = 8+p.length, b = new Uint8Array(s);
+  b[0]=(s>>24)&0xff; b[1]=(s>>16)&0xff; b[2]=(s>>8)&0xff; b[3]=s&0xff;
+  b[4]=t.charCodeAt(0); b[5]=t.charCodeAt(1); b[6]=t.charCodeAt(2); b[7]=t.charCodeAt(3);
+  b.set(p, 8); return b;
+}
+
+function cc() {
+  var t=0; for (var i=0;i<arguments.length;i++) t+=arguments[i].length;
+  var r=new Uint8Array(t),o=0; for (var i=0;i<arguments.length;i++){r.set(arguments[i],o);o+=arguments[i].length;} return r;
+}
+
+function u32(v){return new Uint8Array([(v>>24)&0xff,(v>>16)&0xff,(v>>8)&0xff,v&0xff]);}
+function u16(v){return new Uint8Array([(v>>8)&0xff,v&0xff]);}
+
+function mkInit(sp, pp) {
+  var w=1920, h=1080;
+  var avcC = cc(new Uint8Array([1,sp[1],sp[2],sp[3],0xff,0xe1]),u16(sp.length),sp,new Uint8Array([1]),u16(pp.length),pp);
+  var avc1 = bx('avc1',cc(new Uint8Array(6),u16(1),new Uint8Array(16),u16(w),u16(h),u32(0x00480000),u32(0x00480000),new Uint8Array(4),u16(1),new Uint8Array(32),u16(0x0018),new Uint8Array([0xff,0xff]),bx('avcC',avcC)));
+  var stbl=bx('stbl',cc(bx('stsd',cc(new Uint8Array(4),u32(1),avc1)),bx('stts',new Uint8Array(8)),bx('stsc',new Uint8Array(8)),bx('stsz',new Uint8Array(12)),bx('stco',new Uint8Array(8))));
+  var dinf=bx('dinf',bx('dref',cc(new Uint8Array(4),u32(1),bx('url ',new Uint8Array([0,0,0,1])))));
+  var minf=bx('minf',cc(bx('vmhd',new Uint8Array([0,0,0,1,0,0,0,0,0,0,0,0])),dinf,stbl));
+  var mdia=bx('mdia',cc(bx('mdhd',new Uint8Array([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x03,0xe8,0,0,0,0,0x55,0xc4,0,0])),bx('hdlr',cc(new Uint8Array(4),new Uint8Array(4),new Uint8Array([0x76,0x69,0x64,0x65]),new Uint8Array(12),new Uint8Array([0x56,0x69,0x64,0x65,0x6f,0]))),minf));
+  var mx=new Uint8Array([0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x40,0,0,0]);
+  var trak=bx('trak',cc(bx('tkhd',cc(new Uint8Array([0,0,0,3]),new Uint8Array(8),u32(1),new Uint8Array(4),new Uint8Array(4),new Uint8Array(8),new Uint8Array(2),new Uint8Array(2),new Uint8Array(2),new Uint8Array(2),mx,u16(w),new Uint8Array(2),u16(h),new Uint8Array(2))),mdia));
+  var moov=bx('moov',cc(bx('mvhd',cc(new Uint8Array(4),new Uint8Array(8),u32(1000),new Uint8Array(4),u32(0x00010000),u16(0x0100),new Uint8Array(10),mx,new Uint8Array(24),u32(2))),bx('mvex',bx('trex',cc(new Uint8Array(4),u32(1),u32(1),u32(0),u32(0),u32(0)))),trak));
+  var ftyp=bx('ftyp',cc(new Uint8Array([0x69,0x73,0x6f,0x6d]),u32(0x200),new Uint8Array([0x69,0x73,0x6f,0x6d,0x69,0x73,0x6f,0x32,0x61,0x76,0x63,0x31,0x6d,0x70,0x34,0x31])));
+  return cc(ftyp, moov);
+}
+
+function mkSeg(nalu, ts, isKey) {
+  var nl = parseNALU(nalu), parts = [];
+  for (var i=0;i<nl.length;i++) { var t=nl[i][0]&0x1f; if(t===7||t===8) continue; parts.push(u32(nl[i].length)); parts.push(nl[i]); }
+  if (!parts.length) return null;
+  var sd = cc.apply(null, parts);
+  // sample_flags: keyframe=0x02000000 (depends_on=2), delta=0x01010000 (depends_on=1, non_sync=1)
+  var fl = isKey ? new Uint8Array([0x02,0,0,0]) : new Uint8Array([0x01,0x01,0,0]);
+  // trun flags: 0x0701 = data_offset(0x1) + sample_duration(0x100) + sample_size(0x200) + sample_flags(0x400)
+  var trun=bx('trun',cc(new Uint8Array([0,0,0x07,0x01]),u32(1),u32(0),u32(33),u32(sd.length),fl));
+  var tfhd=bx('tfhd',cc(new Uint8Array([0,0x02,0,0]),u32(1)));
+  var tfdt=bx('tfdt',cc(new Uint8Array(4),u32(ts)));
+  var traf=bx('traf',cc(tfhd,tfdt,trun));
+  var mfhd=bx('mfhd',cc(new Uint8Array(4),u32(mseq++)));
+  var moof=bx('moof',cc(mfhd,traf));
+  var doff=moof.length+8;
+  // patch data_offset in trun (offset to data_offset field: box_header(8) + version_flags(4) + sample_count(4))
+  var to=moof.length-trun.length+8+4+4;
+  moof[to]=(doff>>24)&0xff;moof[to+1]=(doff>>16)&0xff;moof[to+2]=(doff>>8)&0xff;moof[to+3]=doff&0xff;
+  return cc(moof, bx('mdat', sd));
+}
+
+// === Audio ===
+var ad=null, ax=null, anp=0, ast=false;
+window._ac = function(ch, sr) {
+  if (ad && ad.state!=='closed') try{ad.close();}catch(e){}
+  if (ax && ax.state!=='closed') try{ax.close();}catch(e){}
+  if (typeof AudioDecoder==='undefined') return;
+  ax=new AudioContext({sampleRate:sr||48000});
+  ad=new AudioDecoder({
+    output:function(d){if(!ax){d.close();return;}if(ax.state==='suspended')ax.resume();var nf=d.numberOfFrames,nc=d.numberOfChannels;var buf=ax.createBuffer(nc,nf,d.sampleRate);for(var c=0;c<nc;c++){var cd=new Float32Array(nf);d.copyTo(cd,{planeIndex:c,format:'f32-planar'});buf.copyToChannel(cd,c);}d.close();var s=ax.createBufferSource();s.buffer=buf;s.connect(ax.destination);var ct=ax.currentTime;if(!ast||anp<ct){anp=ct+0.05;ast=true;}s.start(anp);anp+=buf.duration;},
+    error:function(e){}
+  });
+  ad.configure({codec:'opus',sampleRate:sr||48000,numberOfChannels:ch||2});
+  anp=0;ast=false;
+};
+
+window._af = function(b64data) {
+  if (ad && ad.state!=='closed') {
+    try { ad.decode(new EncodedAudioChunk({type:'key',timestamp:0,data:b64(b64data)})); } catch(e){}
+  }
+};
+
+// === Receive frame: called from RN via injectJavaScript ===
+// _rf(codec, isKey, base64data, pts)
+var _dbg = 0;
+window._rf = function(codec, isKey, data, pts) {
+  if (_dbg < 3) { _dbg++; post({type:'debug',message:'_rf called: codec='+codec+' key='+isKey+' len='+data.length}); }
+
+  if (mode === 'webcodecs') {
+    if (codec !== wcc && !wcSwitch(codec)) return;
+    if (!wcd || wcd.state === 'closed') return;
+    try {
+      wcd.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: pts || 0, data: b64(data) }));
+    } catch(e) {}
+  } else if (mode === 'mse') {
+    if (codec !== 'h264') {
+      if (_dbg < 10) { _dbg++; post({type:'debug',message:'MSE: need H264, got '+codec}); S.textContent = 'MSE: need H264, got ' + codec; }
+      return;
+    }
+    var raw = b64(data);
+    if (isKey) {
+      var nl = parseNALU(raw);
+      for (var i=0;i<nl.length;i++) { var t=nl[i][0]&0x1f; if(t===7){sps=nl[i];post({type:'debug',message:'SPS found: '+sps.length+'b'});} else if(t===8){pps=nl[i];post({type:'debug',message:'PPS found: '+pps.length+'b'});} }
+      if (sps && pps && !minit) { mq.push(mkInit(sps,pps)); minit=true; post({type:'debug',message:'MSE init segment queued'}); }
+    }
+    if (!minit) return;
+    var seg = mkSeg(raw, mts, isKey);
+    if (seg) { mq.push(seg); mts += 33; tfps(); }
+    mFlush();
+    if (_dbg < 10) { _dbg++; post({type:'debug',message:'MSE: queued seg ts='+mts+' qlen='+mq.length+(V.error?' verr='+V.error.code:'')}); }
+  }
+};
+
+// === Zoom / Pan state ===
+var zs = 1, zx = 0, zy = 0;
+function applyZoom() {
+  var el = (mode === 'mse') ? V : C;
+  el.style.transformOrigin = '0 0';
+  el.style.transform = 'scale(' + zs + ') translate(' + zx + 'px,' + zy + 'px)';
+}
+function clampPan() {
+  if (zs <= 1) { zx = 0; zy = 0; return; }
+  var el = (mode === 'mse') ? V : C;
+  var pw = window.innerWidth, ph = window.innerHeight;
+  var maxX = 0, minX = -(el.offsetWidth - pw / zs);
+  var maxY = 0, minY = -(el.offsetHeight - ph / zs);
+  if (zx > maxX) zx = maxX; if (zx < minX) zx = minX;
+  if (zy > maxY) zy = maxY; if (zy < minY) zy = minY;
+}
+function resetZoom() { zs = 1; zx = 0; zy = 0; applyZoom(); }
+window._rz = function() { resetZoom(); };
+
+// === Trackpad mode ===
+var tpm = false, curX = 0, curY = 0, accel = 1.5;
+var curEl = document.createElement('div');
+curEl.style.cssText = 'position:absolute;width:14px;height:14px;border-radius:50%;border:2px solid #10b981;background:rgba(16,185,129,0.3);pointer-events:none;z-index:100;display:none;transform:translate(-50%,-50%);';
+document.body.appendChild(curEl);
+
+function updateCursor() {
+  if (!tpm || !W) { curEl.style.display = 'none'; return; }
+  var el = (mode === 'mse') ? V : C, r = el.getBoundingClientRect();
+  var cw = W, ch = H, ca = cw / ch, ra = r.width / r.height, rw, rh, ox, oy;
+  if (ra > ca) { rh = r.height; rw = rh * ca; ox = (r.width - rw) / 2; oy = 0; }
+  else { rw = r.width; rh = rw / ca; ox = 0; oy = (r.height - rh) / 2; }
+  curEl.style.display = 'block';
+  curEl.style.left = (r.left + ox + (curX / cw) * rw) + 'px';
+  curEl.style.top = (r.top + oy + (curY / ch) * rh) + 'px';
+}
+window._tp = function(en) {
+  tpm = en;
+  if (tpm) { curX = (W || 1920) / 2; curY = (H || 1080) / 2; updateCursor(); post({type:'mouse',mask:0,x:Math.round(curX),y:Math.round(curY)}); }
+  else { curEl.style.display = 'none'; }
+};
+
+// === Touch coordinate mapping ===
+function co(cx, cy) {
+  var el = (mode === 'mse') ? V : C, r = el.getBoundingClientRect();
+  var cw = W || 1, ch = H || 1, ca = cw / ch, ra = r.width / r.height, rw, rh, ox, oy;
+  if (ra > ca) { rh = r.height; rw = rh * ca; ox = (r.width - rw) / 2; oy = 0; }
+  else { rw = r.width; rh = rw / ca; ox = 0; oy = (r.height - rh) / 2; }
+  return { x: Math.max(0, Math.min(cw, Math.round(((cx - r.left - ox) / rw) * cw))),
+           y: Math.max(0, Math.min(ch, Math.round(((cy - r.top - oy) / rh) * ch))),
+           rw: rw, rh: rh };
+}
+// Pixel ratio for trackpad delta conversion
+function scrToRemote(dx, dy) {
+  var el = (mode === 'mse') ? V : C, r = el.getBoundingClientRect();
+  var cw = W || 1, ch = H || 1, ca = cw / ch, ra = r.width / r.height, rw, rh;
+  if (ra > ca) { rh = r.height; rw = rh * ca; } else { rw = r.width; rh = rw / ca; }
+  return { dx: (dx / rw) * cw, dy: (dy / rh) * ch };
+}
+
+// === Gesture state machine ===
+// lx,ly = current cursor position in remote coords (where clicks go)
+var lx = 0, ly = 0, ts2 = 0, tm = false, lpt = null;
+var touchMode = 'none'; // none|single|pan|pinch|scroll|trackpad|done
+var pinchD0 = 0, pinchS0 = 1, isPinching = false;
+var panSX = 0, panSY = 0, panZx0 = 0, panZy0 = 0;
+var scrollSX = 0, scrollSY = 0; // screen-space ref when 2-finger starts
+
+function pinchDist(e) {
+  var dx = e.touches[0].clientX - e.touches[1].clientX;
+  var dy = e.touches[0].clientY - e.touches[1].clientY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+document.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    clearTimeout(lpt);
+    pinchD0 = pinchDist(e); pinchS0 = zs; isPinching = false;
+    touchMode = 'scroll'; ts2 = Date.now(); tm = false;
+    // Save screen-space ref for scroll movement detection
+    scrollSX = e.touches[0].clientX; scrollSY = e.touches[0].clientY;
+    return;
+  }
+  var t = e.touches[0], c = co(t.clientX, t.clientY);
+  ts2 = Date.now(); tm = false;
+
+  if (zs > 1.05) {
+    // Zoomed in: single finger = pan viewport
+    touchMode = 'pan'; panSX = t.clientX; panSY = t.clientY; panZx0 = zx; panZy0 = zy;
+  } else if (tpm) {
+    // Trackpad mode: relative cursor movement
+    touchMode = 'trackpad'; panSX = t.clientX; panSY = t.clientY;
+    // Long-press → right click at cursor pos
+    lpt = setTimeout(function() {
+      if (!tm) {
+        var ix = Math.round(curX), iy = Math.round(curY);
+        post({type:'mouse',mask:4,x:ix,y:iy});
+        setTimeout(function(){post({type:'mouse',mask:0,x:ix,y:iy});},50);
+        touchMode = 'done';
+      }
+    }, 500);
+  } else {
+    // Absolute mode: move cursor to touch position (no click)
+    touchMode = 'single'; lx = c.x; ly = c.y;
+    post({type:'mouse',mask:0,x:c.x,y:c.y});
+  }
+}, {passive: false});
+
+document.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    var dist = pinchDist(e);
+    if (Math.abs(dist - pinchD0) > 20 && !isPinching) { isPinching = true; touchMode = 'pinch'; }
+    if (touchMode === 'pinch') {
+      zs = Math.max(1, Math.min(5, pinchS0 * (dist / pinchD0)));
+      clampPan(); applyZoom(); if (tpm) updateCursor();
+    } else {
+      // Two-finger scroll — use screen-space distance to detect real movement
+      var t = e.touches[0];
+      var sdy = t.clientY - scrollSY;
+      if (Math.abs(sdy) > 15) {
+        tm = true;
+        var sx = tpm ? Math.round(curX) : lx, sy = tpm ? Math.round(curY) : ly;
+        post({type:'mouse',mask:sdy>0?8:16,x:sx,y:sy});
+        scrollSY = t.clientY;
+      }
+    }
+    return;
+  }
+  if (touchMode === 'pan') {
+    var t = e.touches[0];
+    zx = panZx0 + (t.clientX - panSX) / zs;
+    zy = panZy0 + (t.clientY - panSY) / zs;
+    clampPan(); applyZoom(); if (tpm) updateCursor();
+    return;
+  }
+  if (touchMode === 'trackpad') {
+    tm = true; clearTimeout(lpt);
+    var t = e.touches[0];
+    var dx = (t.clientX - panSX) * accel, dy = (t.clientY - panSY) * accel;
+    panSX = t.clientX; panSY = t.clientY;
+    var rd = scrToRemote(dx, dy);
+    curX = Math.max(0, Math.min(W || 1, curX + rd.dx));
+    curY = Math.max(0, Math.min(H || 1, curY + rd.dy));
+    post({type:'mouse',mask:0,x:Math.round(curX),y:Math.round(curY)});
+    updateCursor();
+    return;
+  }
+  if (touchMode === 'single') {
+    tm = true; clearTimeout(lpt);
+    var t = e.touches[0], c = co(t.clientX, t.clientY);
+    // Move cursor without clicking (mask=0)
+    post({type:'mouse',mask:0,x:c.x,y:c.y});
+    lx = c.x; ly = c.y;
+  }
+}, {passive: false});
+
+document.addEventListener('touchend', function(e) {
+  e.preventDefault(); clearTimeout(lpt);
+
+  // 2 fingers → 1 finger: second finger was a quick tap = LEFT CLICK at cursor
+  if ((touchMode === 'scroll' || touchMode === 'pinch') && e.touches.length === 1) {
+    var elapsed = Date.now() - ts2;
+    post({type:'debug',message:'2→1: mode='+touchMode+' pinch='+isPinching+' tm='+tm+' elapsed='+elapsed});
+    if (!isPinching && elapsed < 500) {
+      // Click at cursor position (lx,ly), not where 2nd finger touched
+      var cx = tpm ? Math.round(curX) : lx, cy = tpm ? Math.round(curY) : ly;
+      post({type:'mouse',mask:1,x:cx,y:cy});
+      setTimeout(function(){post({type:'mouse',mask:0,x:cx,y:cy});},30);
+      post({type:'debug',message:'CLICK at '+cx+','+cy});
+    }
+    // Return to single-finger mode
+    isPinching = false;
+    var rt = e.touches[0];
+    if (tpm) { touchMode = 'trackpad'; panSX = rt.clientX; panSY = rt.clientY; }
+    else if (zs > 1.05) { touchMode = 'pan'; panSX = rt.clientX; panSY = rt.clientY; panZx0 = zx; panZy0 = zy; }
+    else { touchMode = 'single'; }
+    return;
+  }
+
+  // Both fingers lifted together: quick = RIGHT CLICK at cursor
+  if ((touchMode === 'scroll' || touchMode === 'pinch') && e.touches.length === 0) {
+    var elapsed = Date.now() - ts2;
+    post({type:'debug',message:'2→0: mode='+touchMode+' pinch='+isPinching+' tm='+tm+' elapsed='+elapsed});
+    if (!isPinching && elapsed < 500) {
+      var rx = tpm ? Math.round(curX) : lx, ry = tpm ? Math.round(curY) : ly;
+      post({type:'mouse',mask:4,x:rx,y:ry});
+      setTimeout(function(){post({type:'mouse',mask:0,x:rx,y:ry});},50);
+    }
+    isPinching = false; touchMode = 'none'; return;
+  }
+
+  if (touchMode === 'pan' && e.touches.length === 0) { touchMode = 'none'; return; }
+
+  if (touchMode === 'trackpad' && e.touches.length === 0) {
+    // In trackpad, single tap still clicks (for consistency)
+    var d = Date.now() - ts2;
+    if (!tm && d < 300) {
+      var ix = Math.round(curX), iy = Math.round(curY);
+      post({type:'mouse',mask:1,x:ix,y:iy});
+      setTimeout(function(){post({type:'mouse',mask:0,x:ix,y:iy});},30);
+    }
+    touchMode = 'none'; return;
+  }
+
+  if (touchMode === 'single' && e.touches.length === 0) {
+    // Finger lifted — cursor stays, no click
+  }
+  if (touchMode === 'done') { /* long-press already handled */ }
+  if (e.touches.length === 0) touchMode = 'none';
+}, {passive: false});
+
+// Init
+if (typeof VideoDecoder !== 'undefined' && typeof EncodedVideoChunk !== 'undefined') {
+  mode = 'webcodecs'; C.style.display='block'; V.style.display='none'; S.textContent='Ready (WebCodecs)';
+} else if (typeof MediaSource !== 'undefined') {
+  mode = 'mse'; mseInit(); S.textContent='Ready (MSE/H264)';
+} else {
+  S.textContent='No decoder'; post({type:'error',message:'No video decoder available'});
+}
+post({ type: 'ready', renderMode: mode });
+</script>
+</body>
+</html>

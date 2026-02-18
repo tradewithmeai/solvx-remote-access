@@ -30,6 +30,7 @@ import {
   ControlKey,
   ImageQuality,
   BoolOption,
+  PreferCodec,
   PunchHoleFailure,
   ConnType,
   NatType,
@@ -38,8 +39,19 @@ import {
 import Long from 'long';
 import * as sha256Module from 'fast-sha256';
 import { encryptForStorage, decryptFromStorage } from './secure-storage';
+import { AppStorage } from '../utils/storage';
 
 const DEFAULT_RENDEZVOUS_PORT = 21116;
+
+/** Generate a simple v4 UUID without relying on globalThis.crypto.randomUUID */
+function uuid(): string {
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
 const DEFAULT_HOSTS = [
   'rs-ny.rustdesk.com',
 ];
@@ -109,13 +121,6 @@ export class Connection {
   }
 
   async connect(id: string, mode: ConnectionMode = 'both') {
-    // Refuse to connect over insecure origins (except localhost for development)
-    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-      this.events.onError('Security Error', 'HTTPS is required for secure connections. Please use HTTPS.');
-      this.events.onStatus('error');
-      return;
-    }
-
     this.id = id;
     this.mode = mode;
     this.closed = false;
@@ -166,16 +171,18 @@ export class Connection {
 
   private async startConnection(id: string) {
     const uri = this.getRendezvousUri();
+    console.log('[Connection] Rendezvous URI:', uri);
     const ws = new Websock(uri, true);
     this.ws = ws;
 
     await ws.open();
+    console.log('[Connection] Rendezvous connected, latency:', ws.latency, 'ms');
     this.events.onStatus('connecting', 'Negotiating relay...');
 
     ws.sendRendezvous({
       punch_hole_request: {
         id,
-        licence_key: localStorage.getItem('key') || undefined,
+        licence_key: AppStorage.getItem('key') || undefined,
         conn_type: ConnType.DEFAULT_CONN,
         nat_type: NatType.SYMMETRIC,
       },
@@ -215,12 +222,12 @@ export class Connection {
     // Web clients can't do UDP hole-punching. We must ask the rendezvous server
     // to arrange a relay session for us.
     // Retry up to 3 times (matching native client behavior)
-    let uuid = '';
+    let sessionUuid = '';
     let succeeded = false;
     let lastRr: RendezvousMessage['relay_response'] = null;
 
     for (let i = 1; i <= 3; i++) {
-      uuid = globalThis.crypto.randomUUID();
+      sessionUuid = uuid();
       const rdvUri = this.getRendezvousUri();
       const rdvWs = new Websock(rdvUri, true);
 
@@ -229,9 +236,9 @@ export class Connection {
         rdvWs.sendRendezvous({
           request_relay: {
             id: this.id,
-            uuid,
+            uuid: sessionUuid,
             relay_server: relayServer || undefined,
-            licence_key: localStorage.getItem('key') || undefined,
+            licence_key: AppStorage.getItem('key') || undefined,
           },
         });
 
@@ -261,21 +268,29 @@ export class Connection {
     // from the original punch_hole_response, then fall back to rendezvous
     await this.connectRelay({
       relay_server: lastRr.relay_server || relayServer || undefined,
-      uuid,
+      uuid: sessionUuid,
       pk: pk || lastRr.pk || undefined,
       version: lastRr.version,
     });
   }
 
   private async connectRelay(rr: NonNullable<RendezvousMessage['relay_response']>) {
+    console.log('[Connection] Relay response:', JSON.stringify({
+      relay_server: rr.relay_server,
+      uuid: rr.uuid,
+      version: rr.version,
+      has_pk: !!rr.pk,
+    }));
     const pk = rr.pk;
     let uri: string;
     if (rr.relay_server && this.isAllowedRelayServer(rr.relay_server)) {
-      uri = this.makeUri(rr.relay_server, true, 2);
+      // Relay servers use base+3 for WebSocket (21119 with default port)
+      uri = this.makeUri(rr.relay_server, true);
     } else {
       uri = this.getRendezvousUri(true);
     }
 
+    console.log('[Connection] Relay URI:', uri);
     this.events.onStatus('connecting', 'Connecting to relay server...');
     const ws = new Websock(uri, false);
     await ws.open();
@@ -283,7 +298,7 @@ export class Connection {
 
     ws.sendRendezvous({
       request_relay: {
-        licence_key: localStorage.getItem('key') || undefined,
+        licence_key: AppStorage.getItem('key') || undefined,
         uuid: rr.uuid,
       },
     });
@@ -298,7 +313,7 @@ export class Connection {
       try {
         const verifiedPk = await crypto.verify(
           pk,
-          localStorage.getItem('key') || RS_PUBLIC_KEY
+          AppStorage.getItem('key') || RS_PUBLIC_KEY
         );
         if (verifiedPk) {
           const idpk = decodeIdPk(verifiedPk);
@@ -568,7 +583,7 @@ export class Connection {
     this.ws?.sendMessage({
       login_request: {
         username: this.id,
-        my_id: 'web',
+        my_id: 'mobile',
         my_name: 'Solvx',
         password,
         option: this.buildOptionMessage(),
@@ -603,7 +618,16 @@ export class Connection {
     msg.enable_file_transfer = BoolOption.Yes;
     hasOptions = true;
 
-    return hasOptions ? msg : undefined;
+    // Request H264 codec — Android WebView uses MSE which only supports H264
+    msg.supported_decoding = {
+      ability_h264: 1,
+      ability_vp9: 0,
+      ability_h265: 0,
+      ability_av1: 0,
+      prefer: PreferCodec.H264,
+    };
+
+    return msg;
   }
 
   sendVideoReceived() {
@@ -689,10 +713,10 @@ export class Connection {
   }
 
   private getDeviceId(): string {
-    let id = localStorage.getItem('device-id');
+    let id = AppStorage.getItem('device-id');
     if (!id) {
-      id = globalThis.crypto.randomUUID();
-      localStorage.setItem('device-id', id);
+      id = uuid();
+      AppStorage.setItem('device-id', id);
     }
     return id;
   }
@@ -895,24 +919,20 @@ export class Connection {
   }
 
   private getRendezvousUri(isRelay = false): string {
-    const host = localStorage.getItem('custom-rendezvous-server') ||
-      localStorage.getItem('rendezvous-server') ||
+    const host = AppStorage.getItem('custom-rendezvous-server') ||
+      AppStorage.getItem('rendezvous-server') ||
       DEFAULT_HOSTS[0];
     return this.makeUri(host, isRelay);
   }
 
   /** Validate that a server-supplied relay address belongs to a trusted domain. */
   private isAllowedRelayServer(host: string): boolean {
-    const hostname = host.split(':')[0].toLowerCase();
-    // Allow IP addresses (relay within same infrastructure)
-    if (this.isIpAddress(hostname)) return true;
-    // Allow if it matches or is a subdomain of the configured rendezvous server
-    const configuredHost = (
-      localStorage.getItem('custom-rendezvous-server') ||
-      localStorage.getItem('rendezvous-server') ||
-      DEFAULT_HOSTS[0]
-    ).split(':')[0].toLowerCase();
-    return hostname === configuredHost || hostname.endsWith('.' + configuredHost);
+    // In React Native we connect directly (no browser origin restrictions).
+    // The rendezvous server is already trusted, and it vouches for the relay.
+    // RustDesk's public infrastructure uses different domains for relay
+    // (e.g. ovh-fr1.rustdesk.com) vs rendezvous (rs-ny.rustdesk.com).
+    // Trust any relay server returned by a trusted rendezvous server.
+    return !!host;
   }
 
   private makeUri(host: string, isRelay = false, relayOffset = 0): string {
@@ -931,23 +951,8 @@ export class Connection {
       port = DEFAULT_RENDEZVOUS_PORT + (isRelay ? (relayOffset || 3) : 2);
     }
 
-    const target = `${hostname}:${port}`;
-
-    // When served over HTTPS, browsers block ws:// (mixed content).
-    // Route through a WSS proxy that forwards to the plain WS server.
-    const proxyUrl = (import.meta as any).env?.VITE_WS_PROXY_URL;
-    if (proxyUrl) {
-      return `${proxyUrl}/?target=${encodeURIComponent(target)}`;
-    }
-
-    // If page is served over HTTPS, use the default proxy
-    if (typeof location !== 'undefined' && location.protocol === 'https:') {
-      const defaultProxy = 'wss://solvx-ws-proxy.solvx-proxy.workers.dev';
-      return `${defaultProxy}/?target=${encodeURIComponent(target)}`;
-    }
-
-    // Plain HTTP — connect directly
-    return 'ws://' + target;
+    // React Native: connect directly via ws:// (no mixed content restriction)
+    return `ws://${hostname}:${port}`;
   }
 
   private isIpAddress(host: string): boolean {
@@ -959,7 +964,7 @@ export class Connection {
 
   private loadPeerOptions(id: string): Record<string, any> {
     try {
-      const peers = JSON.parse(localStorage.getItem('peers') || '{}');
+      const peers = JSON.parse(AppStorage.getItem('peers') || '{}');
       return peers[id] || {};
     } catch {
       return {};
@@ -974,9 +979,9 @@ export class Connection {
     }
     this.options['tm'] = Date.now();
     try {
-      const peers = JSON.parse(localStorage.getItem('peers') || '{}');
+      const peers = JSON.parse(AppStorage.getItem('peers') || '{}');
       peers[this.id] = this.options;
-      localStorage.setItem('peers', JSON.stringify(peers));
+      AppStorage.setItem('peers', JSON.stringify(peers));
     } catch {}
   }
 
